@@ -1,0 +1,7 @@
+bool clustered_view
+string label_filter
+---
+bool success
+string status_code
+string message
+defect_map_interfaces/DefectEntry[] entries

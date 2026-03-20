@@ -1,0 +1,7 @@
+defect_map_inference:
+  ros__parameters:
+    model_config_path: ""
+    model_weights_path: ""
+    score_threshold: 0.5
+    device: cuda
+    class_names: []

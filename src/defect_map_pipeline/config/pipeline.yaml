@@ -1,0 +1,23 @@
+defect_map_pipeline:
+  ros__parameters:
+    rgb_topic: /camera/camera/color/image_raw
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+    base_frame: world
+    camera_frame: camera_color_optical_frame
+    crop_width: 512
+    crop_height: 512
+    expected_shots_per_image: 4
+    max_queue_size: 16
+    worker_threads: 1
+    inference_timeout_ms: 5000
+    tf_lookup_timeout_ms: 2000
+    cluster_default_enabled: true
+    cluster_voxel_size_m: 0.01
+    cluster_neighbor_distance_m: 0.02
+    cluster_min_points: 5
+    preprocess_mode: composite
+    light_order: [left, bottom, right, top]
+    ps_curv_sigma: 60.0
+    ps_height_sigma: 40.0
+    ps_encode_clip: 4.0

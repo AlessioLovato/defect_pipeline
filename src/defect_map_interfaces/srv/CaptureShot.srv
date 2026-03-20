@@ -1,0 +1,8 @@
+string image_id
+uint32 shot_id
+---
+bool accepted
+string status_code
+string message
+uint32 queue_depth
+builtin_interfaces/Time accepted_stamp
