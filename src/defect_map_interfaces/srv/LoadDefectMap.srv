@@ -1,0 +1,8 @@
+string file_path
+---
+bool success
+string status_code
+string message
+string resolved_file_path
+uint32 loaded_entries
+uint64 latest_uid

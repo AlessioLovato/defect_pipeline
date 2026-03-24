@@ -1,13 +1,8 @@
-string image_id
-uint32 shot_id
-uint32 instance_id
+uint64 uid
+bool cluster
+string zone_id
 string label
-uint16 class_id
 float32 score
-geometry_msgs/Point centroid
-uint32 support_points
-geometry_msgs/Point[] support_points_xyz
 int32[] voxel_ix
 int32[] voxel_iy
 int32[] voxel_iz
-uint32 cluster_id

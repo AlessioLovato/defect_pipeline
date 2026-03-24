@@ -1,0 +1,8 @@
+uint64[] uids
+bool clusters
+---
+bool success
+string status_code
+string message
+uint32 removed_count
+uint64[] not_found_uids

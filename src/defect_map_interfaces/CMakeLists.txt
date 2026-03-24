@@ -14,9 +14,14 @@ set(msg_files
 )
 
 set(srv_files
+  "srv/AddDefects.srv"
   "srv/CaptureShot.srv"
-  "srv/BuildMap.srv"
+  "srv/GetDefects.srv"
   "srv/GetDefectMap.srv"
+  "srv/LoadDefectMap.srv"
+  "srv/ProcessClusters.srv"
+  "srv/RemoveDefects.srv"
+  "srv/SaveDefectMap.srv"
   "srv/ClearDefectMap.srv"
   "srv/SegmentImage.srv"
 )

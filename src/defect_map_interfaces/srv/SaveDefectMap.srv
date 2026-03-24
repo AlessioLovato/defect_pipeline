@@ -1,0 +1,7 @@
+string file_path
+---
+bool success
+string status_code
+string message
+string resolved_file_path
+uint32 saved_entries

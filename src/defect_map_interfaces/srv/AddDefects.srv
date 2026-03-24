@@ -1,0 +1,9 @@
+defect_map_interfaces/DefectEntry[] defects
+---
+bool accepted
+string status_code
+string message
+uint64 latest_uid
+uint32 accepted_count
+uint32 rejected_count
+uint32 retry_after_ms
