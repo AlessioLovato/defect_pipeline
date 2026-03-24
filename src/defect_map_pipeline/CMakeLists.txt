@@ -122,10 +122,20 @@ ament_target_dependencies(defect_map_pipeline_component
 
 rclcpp_components_register_node(defect_map_pipeline_component
   PLUGIN "defect_map_pipeline::DefectMapPipelineNode"
-  EXECUTABLE defect_map_pipeline_node
+  EXECUTABLE defect_map_pipeline_component_node
 )
 
-install(TARGETS defect_map_pipeline_component
+add_executable(defect_map_pipeline_node
+  src/defect_map_pipeline_main.cpp
+)
+target_link_libraries(defect_map_pipeline_node
+  defect_map_pipeline_component
+)
+ament_target_dependencies(defect_map_pipeline_node
+  rclcpp
+)
+
+install(TARGETS defect_map_pipeline_component defect_map_pipeline_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
