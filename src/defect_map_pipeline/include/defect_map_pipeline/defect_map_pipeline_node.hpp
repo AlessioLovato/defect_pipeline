@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -12,6 +13,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include <message_filters/subscriber.hpp>
+#include <message_filters/sync_policies/exact_time.hpp>
+#include <message_filters/synchronizer.hpp>
 #include <opencv2/core.hpp>
 
 #include <builtin_interfaces/msg/time.hpp>
@@ -27,6 +31,7 @@
 #include "defect_map_interfaces/msg/segmented_instance.hpp"
 #include "defect_map_interfaces/srv/build_map.hpp"
 #include "defect_map_interfaces/srv/capture_shot.hpp"
+#include "defect_map_interfaces/srv/clear_defect_map.hpp"
 #include "defect_map_interfaces/srv/get_defect_map.hpp"
 #include "defect_map_interfaces/srv/segment_image.hpp"
 
@@ -40,6 +45,12 @@ public:
   ~DefectMapPipelineNode() override;
 
 private:
+  using FrameSyncPolicy = message_filters::sync_policies::ExactTime<
+    sensor_msgs::msg::Image,
+    sensor_msgs::msg::Image,
+    sensor_msgs::msg::CameraInfo>;
+  using FrameSynchronizer = message_filters::Synchronizer<FrameSyncPolicy>;
+
   struct FrameSnapshot
   {
     sensor_msgs::msg::Image::ConstSharedPtr rgb;
@@ -71,9 +82,10 @@ private:
   };
 
   // ROS callbacks
-  void onRgb(const sensor_msgs::msg::Image::ConstSharedPtr msg);
-  void onDepth(const sensor_msgs::msg::Image::ConstSharedPtr msg);
-  void onCameraInfo(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg);
+  void onSynchronizedFrame(
+    const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
+    const sensor_msgs::msg::Image::ConstSharedPtr & depth,
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info);
 
   void onCaptureShot(
     const std::shared_ptr<defect_map_interfaces::srv::CaptureShot::Request> request,
@@ -86,6 +98,10 @@ private:
   void onGetDefectMap(
     const std::shared_ptr<defect_map_interfaces::srv::GetDefectMap::Request> request,
     std::shared_ptr<defect_map_interfaces::srv::GetDefectMap::Response> response);
+
+  void onClearDefectMap(
+    const std::shared_ptr<defect_map_interfaces::srv::ClearDefectMap::Request> request,
+    std::shared_ptr<defect_map_interfaces::srv::ClearDefectMap::Response> response);
 
   // Worker + processing
   void workerLoop();
@@ -118,7 +134,8 @@ private:
     bool & ok) const;
 
   sensor_msgs::msg::PointCloud2 makeCloud(
-    const std::vector<defect_map_interfaces::msg::DefectEntry> & entries) const;
+    const std::vector<defect_map_interfaces::msg::DefectEntry> & entries,
+    bool use_support_points) const;
 
   std::vector<defect_map_interfaces::msg::DefectEntry> buildClusteredMap(
     const std::vector<defect_map_interfaces::msg::DefectEntry> & raw,
@@ -135,6 +152,7 @@ private:
   std::string rgb_topic_;
   std::string depth_topic_;
   std::string camera_info_topic_;
+  std::string prediction_service_name_;
   std::string base_frame_;
   std::string camera_frame_;
   std::string preprocess_mode_;
@@ -145,8 +163,10 @@ private:
   int expected_shots_per_image_{4};
   int max_queue_size_{16};
   int worker_threads_{1};
-  int inference_timeout_ms_{5000};
+  int prediction_timeout_ms_{5000};
   int tf_lookup_timeout_ms_{2000};
+  int sync_queue_size_{30};
+  bool tf_preflight_enabled_{true};
 
   double ps_curv_sigma_{60.0};
   double ps_height_sigma_{40.0};
@@ -158,18 +178,21 @@ private:
   int cluster_min_points_{5};
 
   // Subscribers/pubs/srvs
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr rgb_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::Image> rgb_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::CameraInfo> camera_info_sub_;
+  std::shared_ptr<FrameSynchronizer> frame_sync_;
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr raw_cloud_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr clustered_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr preprocessed_image_pub_;
 
   rclcpp::Service<defect_map_interfaces::srv::CaptureShot>::SharedPtr capture_service_;
   rclcpp::Service<defect_map_interfaces::srv::BuildMap>::SharedPtr build_map_service_;
   rclcpp::Service<defect_map_interfaces::srv::GetDefectMap>::SharedPtr get_map_service_;
+  rclcpp::Service<defect_map_interfaces::srv::ClearDefectMap>::SharedPtr clear_map_service_;
 
-  rclcpp::Client<defect_map_interfaces::srv::SegmentImage>::SharedPtr inference_client_;
+  rclcpp::Client<defect_map_interfaces::srv::SegmentImage>::SharedPtr prediction_client_;
 
   // TF
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;

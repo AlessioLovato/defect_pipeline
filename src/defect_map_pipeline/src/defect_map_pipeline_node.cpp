@@ -3,19 +3,21 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <future>
 #include <limits>
 #include <set>
 #include <sstream>
 #include <utility>
 
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/time.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <opencv2/imgproc.hpp>
 
@@ -89,6 +91,7 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   declare_parameter<std::string>("rgb_topic", "/camera/camera/color/image_raw");
   declare_parameter<std::string>("depth_topic", "/camera/camera/aligned_depth_to_color/image_raw");
   declare_parameter<std::string>("camera_info_topic", "/camera/camera/color/camera_info");
+  declare_parameter<std::string>("prediction_service_name", "/defect_map_prediction/segment_image");
   declare_parameter<std::string>("base_frame", "world");
   declare_parameter<std::string>("camera_frame", "camera_color_optical_frame");
 
@@ -97,8 +100,10 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   declare_parameter<int>("expected_shots_per_image", 4);
   declare_parameter<int>("max_queue_size", 16);
   declare_parameter<int>("worker_threads", 1);
-  declare_parameter<int>("inference_timeout_ms", 5000);
+  declare_parameter<int>("prediction_timeout_ms", 5000);
   declare_parameter<int>("tf_lookup_timeout_ms", 2000);
+  declare_parameter<int>("sync_queue_size", 30);
+  declare_parameter<bool>("tf_preflight_enabled", true);
 
   declare_parameter<bool>("cluster_default_enabled", true);
   declare_parameter<double>("cluster_voxel_size_m", 0.01);
@@ -115,6 +120,7 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   rgb_topic_ = get_parameter("rgb_topic").as_string();
   depth_topic_ = get_parameter("depth_topic").as_string();
   camera_info_topic_ = get_parameter("camera_info_topic").as_string();
+  prediction_service_name_ = get_parameter("prediction_service_name").as_string();
   base_frame_ = get_parameter("base_frame").as_string();
   camera_frame_ = get_parameter("camera_frame").as_string();
 
@@ -123,8 +129,10 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   expected_shots_per_image_ = get_parameter("expected_shots_per_image").as_int();
   max_queue_size_ = get_parameter("max_queue_size").as_int();
   worker_threads_ = static_cast<int>(std::max<int64_t>(1, get_parameter("worker_threads").as_int()));
-  inference_timeout_ms_ = get_parameter("inference_timeout_ms").as_int();
+  prediction_timeout_ms_ = get_parameter("prediction_timeout_ms").as_int();
   tf_lookup_timeout_ms_ = get_parameter("tf_lookup_timeout_ms").as_int();
+  sync_queue_size_ = static_cast<int>(std::max<int64_t>(1, get_parameter("sync_queue_size").as_int()));
+  tf_preflight_enabled_ = get_parameter("tf_preflight_enabled").as_bool();
 
   cluster_default_enabled_ = get_parameter("cluster_default_enabled").as_bool();
   cluster_voxel_size_m_ = get_parameter("cluster_voxel_size_m").as_double();
@@ -142,20 +150,30 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   ps_height_sigma_ = get_parameter("ps_height_sigma").as_double();
   ps_encode_clip_ = get_parameter("ps_encode_clip").as_double();
 
-  rgb_sub_ = create_subscription<sensor_msgs::msg::Image>(
-    rgb_topic_, rclcpp::SensorDataQoS(),
-    std::bind(&DefectMapPipelineNode::onRgb, this, std::placeholders::_1));
-  depth_sub_ = create_subscription<sensor_msgs::msg::Image>(
-    depth_topic_, rclcpp::SensorDataQoS(),
-    std::bind(&DefectMapPipelineNode::onDepth, this, std::placeholders::_1));
-  camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
-    camera_info_topic_, rclcpp::SensorDataQoS(),
-    std::bind(&DefectMapPipelineNode::onCameraInfo, this, std::placeholders::_1));
+  const auto sensor_qos = rclcpp::SensorDataQoS();
+  const auto rmw_sensor_qos = sensor_qos.get_rmw_qos_profile();
 
+  rgb_sub_.subscribe(this, rgb_topic_, rmw_sensor_qos);
+  depth_sub_.subscribe(this, depth_topic_, rmw_sensor_qos);
+  camera_info_sub_.subscribe(this, camera_info_topic_, rmw_sensor_qos);
+
+  frame_sync_ = std::make_shared<FrameSynchronizer>(
+    FrameSyncPolicy(sync_queue_size_), rgb_sub_, depth_sub_, camera_info_sub_);
+  frame_sync_->registerCallback(std::bind(
+      &DefectMapPipelineNode::onSynchronizedFrame,
+      this,
+      std::placeholders::_1,
+      std::placeholders::_2,
+      std::placeholders::_3));
+
+  const auto debug_cloud_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
   raw_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-    "~/debug/raw_defects_cloud", rclcpp::SensorDataQoS());
+    "~/debug/raw_defects_cloud", debug_cloud_qos);
   clustered_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-    "~/debug/clustered_defects_cloud", rclcpp::SensorDataQoS());
+    "~/debug/clustered_defects_cloud", debug_cloud_qos);
+  const auto debug_image_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+  preprocessed_image_pub_ = create_publisher<sensor_msgs::msg::Image>(
+    "~/debug/preprocessed_image", debug_image_qos);
 
   capture_service_ = create_service<defect_map_interfaces::srv::CaptureShot>(
     "~/capture_shot",
@@ -166,24 +184,35 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   get_map_service_ = create_service<defect_map_interfaces::srv::GetDefectMap>(
     "~/get_defect_map",
     std::bind(&DefectMapPipelineNode::onGetDefectMap, this, std::placeholders::_1, std::placeholders::_2));
+  clear_map_service_ = create_service<defect_map_interfaces::srv::ClearDefectMap>(
+    "~/clear_defect_map",
+    std::bind(&DefectMapPipelineNode::onClearDefectMap, this, std::placeholders::_1, std::placeholders::_2));
 
-  inference_client_ = create_client<defect_map_interfaces::srv::SegmentImage>(
-    "/defect_map_inference/segment_image");
+  prediction_client_ = create_client<defect_map_interfaces::srv::SegmentImage>(
+    prediction_service_name_);
 
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-  tf_preflight_start_ = now();
-  tf_preflight_timer_ = create_wall_timer(
-    std::chrono::milliseconds(200),
-    std::bind(&DefectMapPipelineNode::tfPreflightTick, this));
+  if (tf_preflight_enabled_) {
+    tf_preflight_start_ = now();
+    tf_preflight_timer_ = create_wall_timer(
+      std::chrono::milliseconds(200),
+      std::bind(&DefectMapPipelineNode::tfPreflightTick, this));
+  } else {
+    tf_ready_ = true;
+    RCLCPP_WARN(
+      get_logger(),
+      "TF preflight disabled by parameter tf_preflight_enabled=false. Capture/build_map will not be blocked on startup TF availability.");
+  }
 
   for (int i = 0; i < worker_threads_; ++i) {
     workers_.emplace_back(std::bind(&DefectMapPipelineNode::workerLoop, this));
   }
 
   RCLCPP_INFO(
-    get_logger(), "Pipeline started. preprocess_mode=%s expected_shots=%d max_queue=%d",
-    preprocess_mode_.c_str(), expected_shots_per_image_, max_queue_size_);
+    get_logger(), "Pipeline started. preprocess_mode=%s expected_shots=%d max_queue=%d sync=ExactTime(queue=%d)",
+    preprocess_mode_.c_str(), expected_shots_per_image_, max_queue_size_, sync_queue_size_);
+  RCLCPP_INFO(get_logger(), "Prediction service endpoint: %s", prediction_service_name_.c_str());
 }
 
 DefectMapPipelineNode::~DefectMapPipelineNode()
@@ -228,25 +257,26 @@ void DefectMapPipelineNode::tfPreflightTick()
   }
 }
 
-void DefectMapPipelineNode::onRgb(const sensor_msgs::msg::Image::ConstSharedPtr msg)
+void DefectMapPipelineNode::onSynchronizedFrame(
+  const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
+  const sensor_msgs::msg::Image::ConstSharedPtr & depth,
+  const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info)
 {
   std::lock_guard<std::mutex> lock(frame_mutex_);
-  latest_frame_.rgb = msg;
-  latest_frame_.valid = latest_frame_.rgb && latest_frame_.depth && latest_frame_.info;
-}
+  latest_frame_.rgb = rgb;
+  latest_frame_.depth = depth;
+  latest_frame_.info = info;
+  latest_frame_.valid = static_cast<bool>(rgb && depth && info);
 
-void DefectMapPipelineNode::onDepth(const sensor_msgs::msg::Image::ConstSharedPtr msg)
-{
-  std::lock_guard<std::mutex> lock(frame_mutex_);
-  latest_frame_.depth = msg;
-  latest_frame_.valid = latest_frame_.rgb && latest_frame_.depth && latest_frame_.info;
-}
-
-void DefectMapPipelineNode::onCameraInfo(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg)
-{
-  std::lock_guard<std::mutex> lock(frame_mutex_);
-  latest_frame_.info = msg;
-  latest_frame_.valid = latest_frame_.rgb && latest_frame_.depth && latest_frame_.info;
+  if (latest_frame_.valid) {
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Sync frame received: rgb=%ux%u enc=%s depth=%ux%u enc=%s cam_info=%ux%u stamp=%u.%u",
+      rgb->width, rgb->height, rgb->encoding.c_str(),
+      depth->width, depth->height, depth->encoding.c_str(),
+      info->width, info->height,
+      rgb->header.stamp.sec, rgb->header.stamp.nanosec);
+  }
 }
 
 void DefectMapPipelineNode::onCaptureShot(
@@ -296,6 +326,7 @@ void DefectMapPipelineNode::onCaptureShot(
 
   bool enqueue_ready_job = false;
   CaptureJob new_job;
+  size_t buffered_count = 0U;
 
   {
     std::lock_guard<std::mutex> lock(shot_buffer_mutex_);
@@ -320,6 +351,7 @@ void DefectMapPipelineNode::onCaptureShot(
     }
 
     img_shots[request->shot_id] = shot;
+    buffered_count = img_shots.size();
 
     if (static_cast<int>(img_shots.size()) >= expected_shots_per_image_) {
       new_job.image_id = request->image_id;
@@ -341,10 +373,17 @@ void DefectMapPipelineNode::onCaptureShot(
     }
     job_queue_.push(std::move(new_job));
     response->queue_depth = static_cast<uint32_t>(job_queue_.size());
+    RCLCPP_INFO(
+      get_logger(), "Enqueued complete shot set image_id=%s queue_depth=%u",
+      request->image_id.c_str(), response->queue_depth);
     queue_cv_.notify_one();
   } else {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     response->queue_depth = static_cast<uint32_t>(job_queue_.size());
+    RCLCPP_INFO(
+      get_logger(), "Accepted shot image_id=%s shot_id=%u buffered=%zu/%d queue_depth=%u",
+      request->image_id.c_str(), request->shot_id,
+      buffered_count, expected_shots_per_image_, response->queue_depth);
   }
 
   response->accepted = true;
@@ -403,8 +442,8 @@ void DefectMapPipelineNode::onBuildMap(
     latest_map_clustered_ = clustered;
   }
 
-  raw_cloud_pub_->publish(makeCloud(raw));
-  clustered_cloud_pub_->publish(makeCloud(clustered));
+  raw_cloud_pub_->publish(makeCloud(raw, true));
+  clustered_cloud_pub_->publish(makeCloud(clustered, false));
 
   response->success = true;
   response->status_code = "OK";
@@ -448,6 +487,64 @@ void DefectMapPipelineNode::onGetDefectMap(
   response->message = "Map returned";
 }
 
+void DefectMapPipelineNode::onClearDefectMap(
+  const std::shared_ptr<defect_map_interfaces::srv::ClearDefectMap::Request> request,
+  std::shared_ptr<defect_map_interfaces::srv::ClearDefectMap::Response> response)
+{
+  (void)request;
+
+  uint32_t cleared_raw_entries = 0U;
+  uint32_t cleared_latest_raw_entries = 0U;
+  uint32_t cleared_latest_clustered_entries = 0U;
+  uint32_t cleared_pending_images = 0U;
+  uint32_t cleared_queued_jobs = 0U;
+
+  {
+    std::lock_guard<std::mutex> lock(entries_mutex_);
+    cleared_raw_entries = static_cast<uint32_t>(raw_entries_.size());
+    cleared_latest_raw_entries = static_cast<uint32_t>(latest_map_raw_.size());
+    cleared_latest_clustered_entries = static_cast<uint32_t>(latest_map_clustered_.size());
+    raw_entries_.clear();
+    latest_map_raw_.clear();
+    latest_map_clustered_.clear();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(shot_buffer_mutex_);
+    cleared_pending_images = static_cast<uint32_t>(shot_buffer_.size());
+    shot_buffer_.clear();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    cleared_queued_jobs = static_cast<uint32_t>(job_queue_.size());
+    while (!job_queue_.empty()) {
+      job_queue_.pop();
+    }
+  }
+
+  raw_cloud_pub_->publish(makeCloud({}, true));
+  clustered_cloud_pub_->publish(makeCloud({}, false));
+
+  response->success = true;
+  response->status_code = "OK";
+  response->message = "Defect map state cleared";
+  response->cleared_raw_entries = cleared_raw_entries;
+  response->cleared_latest_raw_entries = cleared_latest_raw_entries;
+  response->cleared_latest_clustered_entries = cleared_latest_clustered_entries;
+  response->cleared_pending_images = cleared_pending_images;
+  response->cleared_queued_jobs = cleared_queued_jobs;
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Clear map requested: raw=%u latest_raw=%u latest_clustered=%u pending_images=%u queued_jobs=%u",
+    response->cleared_raw_entries,
+    response->cleared_latest_raw_entries,
+    response->cleared_latest_clustered_entries,
+    response->cleared_pending_images,
+    response->cleared_queued_jobs);
+}
+
 void DefectMapPipelineNode::workerLoop()
 {
   while (rclcpp::ok()) {
@@ -472,16 +569,21 @@ void DefectMapPipelineNode::processJob(const CaptureJob & job)
     return;
   }
 
+  RCLCPP_INFO(
+    get_logger(), "Processing image_id=%s with %zu shots", job.image_id.c_str(), job.shots.size());
+
   std::vector<cv::Mat> shot_rgbs;
-  std::vector<uint32_t> shot_ids;
   shot_rgbs.reserve(job.shots.size());
-  shot_ids.reserve(job.shots.size());
 
   for (const auto & shot : job.shots) {
     try {
       auto cv_img = cv_bridge::toCvCopy(shot.rgb, sensor_msgs::image_encodings::BGR8);
       shot_rgbs.push_back(cropCenter(cv_img->image));
-      shot_ids.push_back(shot.shot_id);
+      RCLCPP_INFO(
+        get_logger(), "Shot converted image_id=%s shot_id=%u rgb=%dx%d->crop=%dx%d",
+        job.image_id.c_str(), shot.shot_id,
+        cv_img->image.cols, cv_img->image.rows,
+        shot_rgbs.back().cols, shot_rgbs.back().rows);
     } catch (const std::exception & e) {
       RCLCPP_ERROR(get_logger(), "RGB conversion failed for image_id=%s: %s", job.image_id.c_str(), e.what());
       return;
@@ -498,29 +600,42 @@ void DefectMapPipelineNode::processJob(const CaptureJob & job)
     return;
   }
 
-  if (!inference_client_->wait_for_service(std::chrono::seconds(1))) {
-    RCLCPP_ERROR(get_logger(), "Inference service unavailable");
+  std_msgs::msg::Header processed_header;
+  if (job.shots.front().rgb) {
+    processed_header = job.shots.front().rgb->header;
+  } else {
+    processed_header.stamp = now();
+    processed_header.frame_id = camera_frame_;
+  }
+  preprocessed_image_pub_->publish(
+    *cv_bridge::CvImage(processed_header, sensor_msgs::image_encodings::BGR8, processed).toImageMsg());
+  RCLCPP_INFO(
+    get_logger(),
+    "Published preprocessed image image_id=%s size=%dx%d subs=%zu topic=~/debug/preprocessed_image",
+    job.image_id.c_str(), processed.cols, processed.rows,
+    preprocessed_image_pub_->get_subscription_count());
+
+  if (!prediction_client_->wait_for_service(std::chrono::seconds(1))) {
+    RCLCPP_ERROR(get_logger(), "Prediction service unavailable");
     return;
   }
 
   auto request = std::make_shared<defect_map_interfaces::srv::SegmentImage::Request>();
-  request->image_id = job.image_id;
-  request->shot_ids = shot_ids;
   request->score_threshold_override = -1.0F;
   request->roi_rgb_processed =
     *cv_bridge::CvImage(std_msgs::msg::Header(), sensor_msgs::image_encodings::BGR8, processed).toImageMsg();
 
-  auto future = inference_client_->async_send_request(request);
-  if (future.wait_for(std::chrono::milliseconds(inference_timeout_ms_)) != std::future_status::ready) {
-    RCLCPP_ERROR(get_logger(), "Inference timeout for image_id=%s", job.image_id.c_str());
+  auto future = prediction_client_->async_send_request(request);
+  if (future.wait_for(std::chrono::milliseconds(prediction_timeout_ms_)) != std::future_status::ready) {
+    RCLCPP_ERROR(get_logger(), "Prediction timeout for image_id=%s", job.image_id.c_str());
     return;
   }
 
   auto response = future.get();
   if (!response || !response->success) {
     const auto code = response ? response->status_code : std::string("NO_RESPONSE");
-    const auto msg = response ? response->message : std::string("inference response is null");
-    RCLCPP_ERROR(get_logger(), "Inference failed [%s]: %s", code.c_str(), msg.c_str());
+    const auto msg = response ? response->message : std::string("prediction response is null");
+    RCLCPP_ERROR(get_logger(), "Prediction failed [%s]: %s", code.c_str(), msg.c_str());
     return;
   }
 
@@ -831,31 +946,67 @@ geometry_msgs::msg::Point DefectMapPipelineNode::transformPointToBase(
 }
 
 sensor_msgs::msg::PointCloud2 DefectMapPipelineNode::makeCloud(
-  const std::vector<defect_map_interfaces::msg::DefectEntry> & entries) const
+  const std::vector<defect_map_interfaces::msg::DefectEntry> & entries,
+  bool use_support_points) const
 {
   sensor_msgs::msg::PointCloud2 cloud;
   cloud.header.frame_id = base_frame_;
   cloud.header.stamp = now();
   cloud.height = 1;
-  cloud.width = static_cast<uint32_t>(entries.size());
   cloud.is_dense = false;
   cloud.is_bigendian = false;
 
+  size_t point_count = 0U;
+  if (use_support_points) {
+    for (const auto & entry : entries) {
+      if (!entry.support_points_xyz.empty()) {
+        point_count += entry.support_points_xyz.size();
+      } else {
+        point_count += 1U;
+      }
+    }
+  } else {
+    point_count = entries.size();
+  }
+  cloud.width = static_cast<uint32_t>(point_count);
+
   sensor_msgs::PointCloud2Modifier modifier(cloud);
   modifier.setPointCloud2FieldsByString(1, "xyz");
-  modifier.resize(entries.size());
+  modifier.resize(point_count);
 
   sensor_msgs::PointCloud2Iterator<float> iter_x(cloud, "x");
   sensor_msgs::PointCloud2Iterator<float> iter_y(cloud, "y");
   sensor_msgs::PointCloud2Iterator<float> iter_z(cloud, "z");
 
-  for (const auto & entry : entries) {
-    *iter_x = static_cast<float>(entry.centroid.x);
-    *iter_y = static_cast<float>(entry.centroid.y);
-    *iter_z = static_cast<float>(entry.centroid.z);
-    ++iter_x;
-    ++iter_y;
-    ++iter_z;
+  if (use_support_points) {
+    for (const auto & entry : entries) {
+      if (!entry.support_points_xyz.empty()) {
+        for (const auto & p : entry.support_points_xyz) {
+          *iter_x = static_cast<float>(p.x);
+          *iter_y = static_cast<float>(p.y);
+          *iter_z = static_cast<float>(p.z);
+          ++iter_x;
+          ++iter_y;
+          ++iter_z;
+        }
+      } else {
+        *iter_x = static_cast<float>(entry.centroid.x);
+        *iter_y = static_cast<float>(entry.centroid.y);
+        *iter_z = static_cast<float>(entry.centroid.z);
+        ++iter_x;
+        ++iter_y;
+        ++iter_z;
+      }
+    }
+  } else {
+    for (const auto & entry : entries) {
+      *iter_x = static_cast<float>(entry.centroid.x);
+      *iter_y = static_cast<float>(entry.centroid.y);
+      *iter_z = static_cast<float>(entry.centroid.z);
+      ++iter_x;
+      ++iter_y;
+      ++iter_z;
+    }
   }
 
   return cloud;

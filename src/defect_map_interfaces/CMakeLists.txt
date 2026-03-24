@@ -17,6 +17,7 @@ set(srv_files
   "srv/CaptureShot.srv"
   "srv/BuildMap.srv"
   "srv/GetDefectMap.srv"
+  "srv/ClearDefectMap.srv"
   "srv/SegmentImage.srv"
 )
 
