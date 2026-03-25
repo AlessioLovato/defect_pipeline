@@ -23,7 +23,7 @@ class PredictionVisualizerNode(Node):
         self.declare_parameter('visualizer_service_name', '~/segment_image')
         self.declare_parameter('output_topic', '~/overlay_image')
         self.declare_parameter('prediction_timeout_ms', 5000)
-        self.declare_parameter('overlay_alpha', 0.45)
+        self.declare_parameter('overlay_alpha', 0.35)
 
         self._prediction_service_name = self.get_parameter('prediction_service_name').value
         self._visualizer_service_name = self.get_parameter('visualizer_service_name').value
@@ -31,19 +31,19 @@ class PredictionVisualizerNode(Node):
         self._prediction_timeout_ms = int(self.get_parameter('prediction_timeout_ms').value)
         self._overlay_alpha = float(self.get_parameter('overlay_alpha').value)
 
-        # 10-color BGR palette, indexed by defect instance index modulo 10.
+        # Fixed 10-color BGR palette chosen for strong visual separation.
         self._palette = np.array(
             [
-                [255, 56, 56],
-                [255, 157, 151],
-                [255, 112, 31],
-                [255, 178, 29],
-                [207, 210, 49],
-                [72, 249, 10],
-                [146, 204, 23],
-                [61, 219, 134],
-                [26, 147, 52],
-                [0, 212, 187],
+                [0, 0, 255],
+                [0, 255, 0],
+                [255, 0, 0],
+                [0, 255, 255],
+                [255, 0, 255],
+                [255, 255, 0],
+                [0, 128, 255],
+                [255, 0, 128],
+                [255, 255, 255],
+                [128, 0, 255],
             ],
             dtype=np.uint8,
         )
@@ -136,7 +136,8 @@ class PredictionVisualizerNode(Node):
             if not np.any(active):
                 continue
 
-            color = self._palette[idx % len(self._palette)].astype(np.float32)
+            class_index = int(inst.class_id) % len(self._palette)
+            color = self._palette[class_index].astype(np.float32)
             blended = overlay.astype(np.float32)
             blended[active] = (1.0 - alpha) * blended[active] + alpha * color
             overlay = blended.astype(np.uint8)
@@ -144,7 +145,7 @@ class PredictionVisualizerNode(Node):
             ys, xs = np.where(active)
             label_x = int(np.min(xs))
             label_y = int(np.min(ys))
-            label_text = f'#{idx} {inst.label} c{inst.class_id} {inst.score:.2f}'
+            label_text = f'{inst.label} c{inst.class_id} {inst.score:.2f}'
             self._draw_label(overlay, label_text, label_x, label_y, tuple(int(c) for c in color))
 
         out_msg = self._bridge.cv2_to_imgmsg(overlay, encoding='bgr8')

@@ -105,6 +105,17 @@ private:
   };
 
   /**
+   * @brief One debug cloud point with a preselected RGB color.
+   */
+  struct DebugCloudPoint
+  {
+    geometry_msgs::msg::Point point;
+    uint8_t r{255U};
+    uint8_t g{255U};
+    uint8_t b{255U};
+  };
+
+  /**
    * @brief Result of shot-buffer insertion and optional job enqueue.
    */
   struct AppendShotResult
@@ -279,7 +290,7 @@ private:
    * @return PointCloud2 message.
    */
   sensor_msgs::msg::PointCloud2 makeCloudFromPoints(
-    const std::vector<geometry_msgs::msg::Point> & points) const;
+    const std::vector<DebugCloudPoint> & points) const;
 
   /**
    * @brief Uppercase helper for parameter normalization.
@@ -325,7 +336,6 @@ private:
   std::shared_ptr<FrameSynchronizer> frame_sync_;
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr raw_cloud_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr clustered_cloud_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr preprocessed_image_pub_;
 
   rclcpp::Service<defect_map_interfaces::srv::CaptureShot>::SharedPtr capture_service_;

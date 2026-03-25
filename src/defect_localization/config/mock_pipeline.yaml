@@ -1,0 +1,27 @@
+defect_localization:
+  ros__parameters:
+    rgb_topic: /camera/camera/color/image_raw
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+    base_frame: world
+    camera_frame: camera_color_optical_frame
+    crop_width: 512
+    crop_height: 512
+    crop_offset_x: 0
+    crop_offset_y: 0
+    expected_shots_per_image: 4
+    max_queue_size: 16
+    worker_threads: 1
+    prediction_timeout_ms: 5000
+    map_write_timeout_ms: 2000
+    tf_lookup_timeout_ms: 2000
+    capture_next_frame_timeout_ms: 1000
+    tf_preflight_enabled: true
+    sync_queue_size: 30
+    map_add_defects_service_name: /defect_map/add_defects
+    voxel_size_m: 0.01
+    preprocess_mode: curvature
+    light_order: [left, bottom, right, top]
+    ps_curv_sigma: 60.0
+    ps_height_sigma: 40.0
+    ps_encode_clip: 4.0

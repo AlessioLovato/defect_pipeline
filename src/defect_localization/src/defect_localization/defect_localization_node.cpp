@@ -6,6 +6,7 @@
 #include "defect_localization/defect_localization_node.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cctype>
@@ -33,6 +34,31 @@ namespace defect_localization
 {
 namespace
 {
+
+struct DebugColor
+{
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+
+constexpr std::array<DebugColor, 10> kDebugPalette{{
+  {255U, 0U, 0U},
+  {0U, 255U, 0U},
+  {0U, 0U, 255U},
+  {255U, 255U, 0U},
+  {255U, 0U, 255U},
+  {0U, 255U, 255U},
+  {255U, 128U, 0U},
+  {128U, 0U, 255U},
+  {255U, 255U, 255U},
+  {255U, 0U, 128U},
+}};
+
+DebugColor colorForClassId(uint16_t class_id)
+{
+  return kDebugPalette[static_cast<size_t>(class_id) % kDebugPalette.size()];
+}
 
 /**
  * @brief Read metric depth value from a depth image pixel.
@@ -222,11 +248,9 @@ DefectLocalizationNode::DefectLocalizationNode(const rclcpp::NodeOptions & optio
       std::placeholders::_3));
 
   // Debug publishers.
-  const auto debug_cloud_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+  const auto debug_cloud_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
   raw_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
     "~/debug/raw_defects_cloud", debug_cloud_qos);
-  clustered_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-    "~/debug/clustered_defects_cloud", debug_cloud_qos);
   const auto debug_image_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
   preprocessed_image_pub_ = create_publisher<sensor_msgs::msg::Image>(
     "~/debug/preprocessed_image", debug_image_qos);
@@ -866,7 +890,9 @@ void DefectLocalizationNode::processJob(const CaptureJob & job)
   std::vector<defect_map_interfaces::msg::DefectEntry> defects;
   defects.reserve(prediction_response->instances.size());
 
-  std::vector<geometry_msgs::msg::Point> debug_points;
+  std::vector<DebugCloudPoint> debug_points;
+  size_t projected_instance_count = 0U;
+  size_t skipped_instance_count = 0U;
 
   for (const auto & inst : prediction_response->instances) {
     cv::Mat mask;
@@ -874,11 +900,20 @@ void DefectLocalizationNode::processJob(const CaptureJob & job)
       mask = cv_bridge::toCvCopy(inst.mask, sensor_msgs::image_encodings::MONO8)->image;
     } catch (const std::exception & e) {
       RCLCPP_WARN(get_logger(), "Mask conversion failed for image_id=%s: %s", job.image_id.c_str(), e.what());
+      ++skipped_instance_count;
       continue;
     }
 
     std::vector<geometry_msgs::msg::Point> points_base;
     if (!projectMaskToBasePoints(mask, depth_ref, info_ref, depth_frame, capture_stamp, points_base)) {
+      RCLCPP_INFO(
+        get_logger(),
+        "No valid 3D projection for image_id=%s label=%s class_id=%u score=%.3f",
+        job.image_id.c_str(),
+        inst.label.c_str(),
+        inst.class_id,
+        inst.score);
+      ++skipped_instance_count;
       continue;
     }
 
@@ -887,6 +922,13 @@ void DefectLocalizationNode::processJob(const CaptureJob & job)
     std::vector<int32_t> voxel_iz;
     pointsToVoxels(points_base, voxel_ix, voxel_iy, voxel_iz);
     if (voxel_ix.empty()) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Projection collapsed to zero voxels for image_id=%s label=%s class_id=%u",
+        job.image_id.c_str(),
+        inst.label.c_str(),
+        inst.class_id);
+      ++skipped_instance_count;
       continue;
     }
 
@@ -901,11 +943,25 @@ void DefectLocalizationNode::processJob(const CaptureJob & job)
     entry.voxel_iz = std::move(voxel_iz);
     defects.push_back(std::move(entry));
 
-    debug_points.insert(debug_points.end(), points_base.begin(), points_base.end());
+    const auto color = colorForClassId(inst.class_id);
+    for (const auto & point : points_base) {
+      debug_points.push_back(DebugCloudPoint{
+        .point = point,
+        .r = color.r,
+        .g = color.g,
+        .b = color.b});
+    }
+    ++projected_instance_count;
   }
 
   if (defects.empty()) {
-    RCLCPP_WARN(get_logger(), "No valid defects generated for image_id=%s", job.image_id.c_str());
+    RCLCPP_WARN(
+      get_logger(),
+      "No valid defects generated for image_id=%s instances=%zu projected=%zu skipped=%zu",
+      job.image_id.c_str(),
+      prediction_response->instances.size(),
+      projected_instance_count,
+      skipped_instance_count);
     return;
   }
 
@@ -923,8 +979,6 @@ void DefectLocalizationNode::processJob(const CaptureJob & job)
 
   const auto cloud = makeCloudFromPoints(debug_points);
   raw_cloud_pub_->publish(cloud);
-  // Clustered debug topic is kept for compatibility until the map node is introduced.
-  clustered_cloud_pub_->publish(cloud);
 }
 
 /**
@@ -1096,7 +1150,7 @@ cv::Mat DefectLocalizationNode::preprocessCurvature(const std::vector<cv::Mat> &
  * @brief Build PointCloud2 debug message from point list.
  */
 sensor_msgs::msg::PointCloud2 DefectLocalizationNode::makeCloudFromPoints(
-  const std::vector<geometry_msgs::msg::Point> & points) const
+  const std::vector<DebugCloudPoint> & points) const
 {
   sensor_msgs::msg::PointCloud2 cloud;
   cloud.header.frame_id = base_frame_;
@@ -1107,20 +1161,29 @@ sensor_msgs::msg::PointCloud2 DefectLocalizationNode::makeCloudFromPoints(
   cloud.is_bigendian = false;
 
   sensor_msgs::PointCloud2Modifier modifier(cloud);
-  modifier.setPointCloud2FieldsByString(1, "xyz");
+  modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
   modifier.resize(points.size());
 
   sensor_msgs::PointCloud2Iterator<float> iter_x(cloud, "x");
   sensor_msgs::PointCloud2Iterator<float> iter_y(cloud, "y");
   sensor_msgs::PointCloud2Iterator<float> iter_z(cloud, "z");
+  sensor_msgs::PointCloud2Iterator<uint8_t> iter_r(cloud, "r");
+  sensor_msgs::PointCloud2Iterator<uint8_t> iter_g(cloud, "g");
+  sensor_msgs::PointCloud2Iterator<uint8_t> iter_b(cloud, "b");
 
   for (const auto & p : points) {
-    *iter_x = static_cast<float>(p.x);
-    *iter_y = static_cast<float>(p.y);
-    *iter_z = static_cast<float>(p.z);
+    *iter_x = static_cast<float>(p.point.x);
+    *iter_y = static_cast<float>(p.point.y);
+    *iter_z = static_cast<float>(p.point.z);
+    *iter_r = p.r;
+    *iter_g = p.g;
+    *iter_b = p.b;
     ++iter_x;
     ++iter_y;
     ++iter_z;
+    ++iter_r;
+    ++iter_g;
+    ++iter_b;
   }
 
   return cloud;
