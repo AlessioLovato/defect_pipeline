@@ -1,0 +1,7 @@
+defect_map_prediction:
+  ros__parameters:
+    model_config_path: "$(find-pkg-share defect_localization)/models/maskrcnn-height-curv-augmented-16/config.yaml"
+    model_weights_path: "$(find-pkg-share defect_localization)/models/maskrcnn-height-curv-augmented-16/model_final.pth"
+    score_threshold: 0.5
+    device: cuda
+    class_names: ['positive', 'negative', 'line', 'crack', 'wood', 'dent']

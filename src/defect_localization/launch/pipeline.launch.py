@@ -6,7 +6,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    pkg_share = FindPackageShare('defect_map_pipeline')
+    pkg_share = FindPackageShare('defect_localization')
     params_file = LaunchConfiguration('params_file')
     prediction_service_name = LaunchConfiguration('prediction_service_name')
     map_add_defects_service_name = LaunchConfiguration('map_add_defects_service_name')
@@ -28,9 +28,9 @@ def generate_launch_description():
             description='AddDefects service used by pipeline map-writer client.',
         ),
         Node(
-            package='defect_map_pipeline',
-            executable='defect_map_pipeline_node',
-            name='defect_map_pipeline',
+            package='defect_localization',
+            executable='defect_localization_node',
+            name='defect_localization',
             output='screen',
             parameters=[params_file, {
                 'prediction_service_name': prediction_service_name,

@@ -7,7 +7,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    pkg_share = FindPackageShare('defect_map_pipeline')
+    pkg_share = FindPackageShare('defect_localization')
     prediction_launch = PathJoinSubstitution([pkg_share, 'launch', 'prediction.launch.py'])
 
     return LaunchDescription([
@@ -59,7 +59,7 @@ def generate_launch_description():
             }.items(),
         ),
         Node(
-            package='defect_map_pipeline',
+            package='defect_localization',
             executable='prediction_visualizer_node.py',
             name='prediction_visualizer',
             output='screen',

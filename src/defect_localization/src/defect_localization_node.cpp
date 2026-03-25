@@ -1,9 +1,9 @@
 /**
- * @file defect_map_pipeline_node.cpp
- * @brief Implementation of the modular defect_map_pipeline ROS 2 node.
+ * @file defect_localization_node.cpp
+ * @brief Implementation of the modular defect_localization ROS 2 node.
  * @author Alessio Lovato
  */
-#include "defect_map_pipeline/defect_map_pipeline_node.hpp"
+#include "defect_localization/defect_localization_node.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -29,7 +29,7 @@
 
 #include "rclcpp_components/register_node_macro.hpp"
 
-namespace defect_map_pipeline
+namespace defect_localization
 {
 namespace
 {
@@ -114,8 +114,8 @@ cv::Mat clipMapToU8(const cv::Mat & input, double clip)
  * @brief Construct the pipeline node and initialize all internal modules.
  * @param options ROS node options.
  */
-DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options)
-: Node("defect_map_pipeline", options)
+DefectLocalizationNode::DefectLocalizationNode(const rclcpp::NodeOptions & options)
+: Node("defect_localization", options)
 {
   // Core topics/services.
   declare_parameter<std::string>("rgb_topic", "/camera/camera/color/image_raw");
@@ -129,6 +129,8 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   declare_parameter<std::string>("camera_frame", "camera_color_optical_frame");
   declare_parameter<int>("crop_width", 512);
   declare_parameter<int>("crop_height", 512);
+  declare_parameter<int>("crop_offset_x", 0);
+  declare_parameter<int>("crop_offset_y", 0);
   declare_parameter<int>("expected_shots_per_image", 4);
   declare_parameter<int>("max_queue_size", 16);
   declare_parameter<int>("worker_threads", 1);
@@ -158,6 +160,8 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   camera_frame_ = get_parameter("camera_frame").as_string();
   crop_width_ = get_parameter("crop_width").as_int();
   crop_height_ = get_parameter("crop_height").as_int();
+  crop_offset_x_ = get_parameter("crop_offset_x").as_int();
+  crop_offset_y_ = get_parameter("crop_offset_y").as_int();
   expected_shots_per_image_ = get_parameter("expected_shots_per_image").as_int();
   max_queue_size_ = get_parameter("max_queue_size").as_int();
   worker_threads_ = static_cast<int>(std::max<int64_t>(1, get_parameter("worker_threads").as_int())); // ROS 2 returns int64_t, thus need to cast '1'.
@@ -194,7 +198,7 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
     tf_preflight_start_ = now();
     tf_preflight_timer_ = create_wall_timer(
       std::chrono::milliseconds(200),
-      std::bind(&DefectMapPipelineNode::tfPreflightTick, this));
+      std::bind(&DefectLocalizationNode::tfPreflightTick, this));
   } else {
     tf_ready_ = true;
     RCLCPP_WARN(
@@ -211,7 +215,7 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   frame_sync_ = std::make_shared<FrameSynchronizer>(
     FrameSyncPolicy(sync_queue_size_), rgb_sub_, depth_sub_, camera_info_sub_);
   frame_sync_->registerCallback(std::bind(
-      &DefectMapPipelineNode::onSynchronizedFrame,
+      &DefectLocalizationNode::onSynchronizedFrame,
       this,
       std::placeholders::_1,
       std::placeholders::_2,
@@ -231,7 +235,7 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
   capture_service_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   capture_service_ = create_service<defect_map_interfaces::srv::CaptureShot>(
     "~/capture_shot",
-    std::bind(&DefectMapPipelineNode::onCaptureShot, this, std::placeholders::_1, std::placeholders::_2),
+    std::bind(&DefectLocalizationNode::onCaptureShot, this, std::placeholders::_1, std::placeholders::_2),
     rclcpp::ServicesQoS(),
     capture_service_callback_group_);
 
@@ -241,7 +245,7 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
 
   // Queue/worker orchestration module.
   for (int i = 0; i < worker_threads_; ++i) {
-    workers_.emplace_back(std::bind(&DefectMapPipelineNode::workerLoop, this));
+    workers_.emplace_back(std::bind(&DefectLocalizationNode::workerLoop, this));
   }
 
   RCLCPP_INFO(
@@ -255,7 +259,7 @@ DefectMapPipelineNode::DefectMapPipelineNode(const rclcpp::NodeOptions & options
 /**
  * @brief Stop workers and release synchronization resources.
  */
-DefectMapPipelineNode::~DefectMapPipelineNode()
+DefectLocalizationNode::~DefectLocalizationNode()
 {
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -279,7 +283,7 @@ DefectMapPipelineNode::~DefectMapPipelineNode()
 /**
  * @brief Check TF availability during startup preflight.
  */
-void DefectMapPipelineNode::tfPreflightTick()
+void DefectLocalizationNode::tfPreflightTick()
 {
   if (tf_ready_ || tf_permanent_error_) {
     return;
@@ -313,7 +317,7 @@ void DefectMapPipelineNode::tfPreflightTick()
  * @param depth Synchronized depth image.
  * @param info Synchronized camera info.
  */
-void DefectMapPipelineNode::onSynchronizedFrame(
+void DefectLocalizationNode::onSynchronizedFrame(
   const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
   const sensor_msgs::msg::Image::ConstSharedPtr & depth,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info)
@@ -348,7 +352,7 @@ void DefectMapPipelineNode::onSynchronizedFrame(
  * @brief Insert one shot into per-image buffer and emit a ready job when complete.
  * @return Detailed append/enqueue result for service response handling.
  */
-DefectMapPipelineNode::AppendShotResult DefectMapPipelineNode::appendShotAndMaybeBuildJob(
+DefectLocalizationNode::AppendShotResult DefectLocalizationNode::appendShotAndMaybeBuildJob(
   const ShotData & shot)
 {
   AppendShotResult result;
@@ -413,7 +417,7 @@ DefectMapPipelineNode::AppendShotResult DefectMapPipelineNode::appendShotAndMayb
  * @brief Block until work is available or shutdown is requested.
  * @return True when a job is popped, false on shutdown.
  */
-bool DefectMapPipelineNode::dequeueJob(CaptureJob & job)
+bool DefectLocalizationNode::dequeueJob(CaptureJob & job)
 {
   std::unique_lock<std::mutex> lock(queue_mutex_);
   queue_cv_.wait(lock, [this]() { return stop_worker_ || !job_queue_.empty(); });
@@ -430,7 +434,7 @@ bool DefectMapPipelineNode::dequeueJob(CaptureJob & job)
 /**
  * @brief Capture service callback entrypoint.
  */
-void DefectMapPipelineNode::onCaptureShot(
+void DefectLocalizationNode::onCaptureShot(
   const std::shared_ptr<defect_map_interfaces::srv::CaptureShot::Request> request,
   std::shared_ptr<defect_map_interfaces::srv::CaptureShot::Response> response)
 {
@@ -526,7 +530,7 @@ void DefectMapPipelineNode::onCaptureShot(
 /**
  * @brief Worker thread loop executing queued jobs.
  */
-void DefectMapPipelineNode::workerLoop()
+void DefectLocalizationNode::workerLoop()
 {
   // Workers run independently from ROS callbacks to keep capture latency low.
   while (rclcpp::ok()) {
@@ -542,7 +546,7 @@ void DefectMapPipelineNode::workerLoop()
  * @brief Call external SegmentImage service with processed image.
  * @return True when a response object is received before timeout.
  */
-bool DefectMapPipelineNode::callPrediction(
+bool DefectLocalizationNode::callPrediction(
   const cv::Mat & processed,
   defect_map_interfaces::srv::SegmentImage::Response::SharedPtr & response_out)
 {
@@ -569,7 +573,7 @@ bool DefectMapPipelineNode::callPrediction(
  * @brief Project mask pixels with valid depth to base-frame 3D points.
  * @return True when at least one valid transformed point is produced.
  */
-bool DefectMapPipelineNode::projectMaskToBasePoints(
+bool DefectLocalizationNode::projectMaskToBasePoints(
   const cv::Mat & mask,
   const sensor_msgs::msg::Image::ConstSharedPtr & depth,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info,
@@ -638,7 +642,7 @@ bool DefectMapPipelineNode::projectMaskToBasePoints(
  * @brief Transform a batch of points to base_frame using one TF lookup.
  * @return True on successful transform.
  */
-bool DefectMapPipelineNode::transformPointsToBase(
+bool DefectLocalizationNode::transformPointsToBase(
   const std::vector<geometry_msgs::msg::Point> & points,
   const std::string & from_frame,
   const builtin_interfaces::msg::Time & stamp,
@@ -680,7 +684,7 @@ bool DefectMapPipelineNode::transformPointsToBase(
  * @brief Generate next local outgoing UID for defect entries.
  * @return Monotonic UID value.
  */
-uint64_t DefectMapPipelineNode::nextUid()
+uint64_t DefectLocalizationNode::nextUid()
 {
   return next_uid_.fetch_add(1U, std::memory_order_relaxed);
 }
@@ -688,7 +692,7 @@ uint64_t DefectMapPipelineNode::nextUid()
 /**
  * @brief Convert base-frame points to deduplicated voxel index arrays.
  */
-void DefectMapPipelineNode::pointsToVoxels(
+void DefectLocalizationNode::pointsToVoxels(
   const std::vector<geometry_msgs::msg::Point> & points_base,
   std::vector<int32_t> & voxel_ix,
   std::vector<int32_t> & voxel_iy,
@@ -725,7 +729,7 @@ void DefectMapPipelineNode::pointsToVoxels(
  * @brief Send AddDefects request and apply UID resync feedback when needed.
  * @return True when map writer accepts the batch.
  */
-bool DefectMapPipelineNode::sendDefectsToMap(
+bool DefectLocalizationNode::sendDefectsToMap(
   const std::vector<defect_map_interfaces::msg::DefectEntry> & defects,
   std::string & status_code,
   std::string & status_message)
@@ -785,7 +789,7 @@ bool DefectMapPipelineNode::sendDefectsToMap(
  * @brief Process one capture job from preprocessing to map-write request.
  * @param job Complete shot set for one image.
  */
-void DefectMapPipelineNode::processJob(const CaptureJob & job)
+void DefectLocalizationNode::processJob(const CaptureJob & job)
 {
   if (job.shots.empty()) {
     return;
@@ -926,19 +930,34 @@ void DefectMapPipelineNode::processJob(const CaptureJob & job)
 /**
  * @brief Crop a centered ROI using configured dimensions.
  */
-cv::Mat DefectMapPipelineNode::cropCenter(const cv::Mat & input) const
+cv::Mat DefectLocalizationNode::cropCenter(const cv::Mat & input) const
 {
-  const int w = std::min(crop_width_, input.cols);
-  const int h = std::min(crop_height_, input.rows);
-  const int x = std::max(0, (input.cols - w) / 2);
-  const int y = std::max(0, (input.rows - h) / 2);
+  if (input.empty()) {
+    return {};
+  }
+
+  const int requested_w = std::max(1, crop_width_);
+  const int requested_h = std::max(1, crop_height_);
+  const int w = std::min(requested_w, input.cols);
+  const int h = std::min(requested_h, input.rows);
+
+  const int image_cx = input.cols / 2;
+  const int image_cy = input.rows / 2;
+  const int target_cx = image_cx + crop_offset_x_;
+  const int target_cy = image_cy + crop_offset_y_;
+
+  int x = target_cx - (w / 2);
+  int y = target_cy - (h / 2);
+  x = std::clamp(x, 0, std::max(0, input.cols - w));
+  y = std::clamp(y, 0, std::max(0, input.rows - h));
+
   return input(cv::Rect(x, y, w, h)).clone();
 }
 
 /**
  * @brief Dispatch preprocessing mode.
  */
-cv::Mat DefectMapPipelineNode::preprocessShots(const std::vector<cv::Mat> & shot_rgbs) const
+cv::Mat DefectLocalizationNode::preprocessShots(const std::vector<cv::Mat> & shot_rgbs) const
 {
   if (shot_rgbs.empty()) {
     return {};
@@ -962,7 +981,7 @@ cv::Mat DefectMapPipelineNode::preprocessShots(const std::vector<cv::Mat> & shot
 /**
  * @brief Build normal-map encoding from 4 directional shots.
  */
-cv::Mat DefectMapPipelineNode::preprocessNormal(const std::vector<cv::Mat> & shot_rgbs) const
+cv::Mat DefectLocalizationNode::preprocessNormal(const std::vector<cv::Mat> & shot_rgbs) const
 {
   if (shot_rgbs.size() < 4) {
     return shot_rgbs.front().clone();
@@ -1005,7 +1024,7 @@ cv::Mat DefectMapPipelineNode::preprocessNormal(const std::vector<cv::Mat> & sho
 /**
  * @brief Build curvature/height/albedo composite encoding.
  */
-cv::Mat DefectMapPipelineNode::preprocessComposite(const std::vector<cv::Mat> & shot_rgbs) const
+cv::Mat DefectLocalizationNode::preprocessComposite(const std::vector<cv::Mat> & shot_rgbs) const
 {
   if (shot_rgbs.size() < 4) {
     return shot_rgbs.front().clone();
@@ -1045,7 +1064,7 @@ cv::Mat DefectMapPipelineNode::preprocessComposite(const std::vector<cv::Mat> & 
 /**
  * @brief Build multi-scale curvature encoding.
  */
-cv::Mat DefectMapPipelineNode::preprocessCurvature(const std::vector<cv::Mat> & shot_rgbs) const
+cv::Mat DefectLocalizationNode::preprocessCurvature(const std::vector<cv::Mat> & shot_rgbs) const
 {
   if (shot_rgbs.size() < 4) {
     return shot_rgbs.front().clone();
@@ -1076,7 +1095,7 @@ cv::Mat DefectMapPipelineNode::preprocessCurvature(const std::vector<cv::Mat> & 
 /**
  * @brief Build PointCloud2 debug message from point list.
  */
-sensor_msgs::msg::PointCloud2 DefectMapPipelineNode::makeCloudFromPoints(
+sensor_msgs::msg::PointCloud2 DefectLocalizationNode::makeCloudFromPoints(
   const std::vector<geometry_msgs::msg::Point> & points) const
 {
   sensor_msgs::msg::PointCloud2 cloud;
@@ -1110,7 +1129,7 @@ sensor_msgs::msg::PointCloud2 DefectMapPipelineNode::makeCloudFromPoints(
 /**
  * @brief Convert string to uppercase.
  */
-std::string DefectMapPipelineNode::toUpper(std::string value)
+std::string DefectLocalizationNode::toUpper(std::string value)
 {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
     return static_cast<char>(std::toupper(c));
@@ -1118,6 +1137,6 @@ std::string DefectMapPipelineNode::toUpper(std::string value)
   return value;
 }
 
-}  // namespace defect_map_pipeline
+}  // namespace defect_localization
 
-RCLCPP_COMPONENTS_REGISTER_NODE(defect_map_pipeline::DefectMapPipelineNode)
+RCLCPP_COMPONENTS_REGISTER_NODE(defect_localization::DefectLocalizationNode)

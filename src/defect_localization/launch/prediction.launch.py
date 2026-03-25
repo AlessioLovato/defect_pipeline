@@ -7,7 +7,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    pkg_share = FindPackageShare('defect_map_pipeline')
+    pkg_share = FindPackageShare('defect_localization')
 
     params_file = LaunchConfiguration('params_file')
     model_config_path = LaunchConfiguration('model_config_path')
@@ -35,7 +35,7 @@ def generate_launch_description():
             description='Detectron2 weights file path',
         ),
         Node(
-            package='defect_map_pipeline',
+            package='defect_localization',
             executable='detectron2_predictor_node.py',
             name='defect_map_prediction',
             output='screen',

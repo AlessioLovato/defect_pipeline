@@ -1,10 +1,10 @@
 /**
- * @file defect_map_pipeline_node.hpp
- * @brief Declaration of the modular defect_map_pipeline ROS 2 node.
+ * @file defect_localization_node.hpp
+ * @brief Declaration of the modular defect_localization ROS 2 node.
  * @author Alessio Lovato
  */
-#ifndef DEFECT_MAP_PIPELINE__DEFECT_MAP_PIPELINE_NODE_HPP_
-#define DEFECT_MAP_PIPELINE__DEFECT_MAP_PIPELINE_NODE_HPP_
+#ifndef DEFECT_LOCALIZATION__DEFECT_LOCALIZATION_NODE_HPP_
+#define DEFECT_LOCALIZATION__DEFECT_LOCALIZATION_NODE_HPP_
 
 #include <atomic>
 #include <condition_variable>
@@ -37,7 +37,7 @@
 #include "defect_map_interfaces/srv/capture_shot.hpp"
 #include "defect_map_interfaces/srv/segment_image.hpp"
 
-namespace defect_map_pipeline
+namespace defect_localization
 {
 
 /**
@@ -51,19 +51,19 @@ namespace defect_map_pipeline
  *   voxelizes/deduplicates them, and sends @c DefectEntry batches to @c AddDefects.
  * - Does not own persistent map storage; authoritative map state lives in the map node.
  */
-class DefectMapPipelineNode : public rclcpp::Node
+class DefectLocalizationNode : public rclcpp::Node
 {
 public:
   /**
    * @brief Construct and wire all runtime modules (sync, queue, workers, clients).
    * @param options ROS node options.
    */
-  explicit DefectMapPipelineNode(const rclcpp::NodeOptions & options);
+  explicit DefectLocalizationNode(const rclcpp::NodeOptions & options);
 
   /**
    * @brief Stop worker threads and release resources.
    */
-  ~DefectMapPipelineNode() override;
+  ~DefectLocalizationNode() override;
 
 private:
   using FrameSyncPolicy = message_filters::sync_policies::ExactTime<
@@ -301,6 +301,8 @@ private:
 
   int crop_width_{512};
   int crop_height_{512};
+  int crop_offset_x_{0};
+  int crop_offset_y_{0};
   int expected_shots_per_image_{4};
   int max_queue_size_{16};
   int worker_threads_{1};
@@ -362,6 +364,6 @@ private:
   std::atomic<uint64_t> next_uid_{1U};
 };
 
-}  // namespace defect_map_pipeline
+}  // namespace defect_localization
 
-#endif  // DEFECT_MAP_PIPELINE__DEFECT_MAP_PIPELINE_NODE_HPP_
+#endif  // DEFECT_LOCALIZATION__DEFECT_LOCALIZATION_NODE_HPP_

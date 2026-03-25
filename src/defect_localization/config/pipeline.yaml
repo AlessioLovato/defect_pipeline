@@ -1,4 +1,4 @@
-defect_map_pipeline:
+defect_localization:
   ros__parameters:
     rgb_topic: /camera/camera/color/image_raw
     depth_topic: /camera/camera/aligned_depth_to_color/image_raw
@@ -8,6 +8,8 @@ defect_map_pipeline:
     camera_frame: camera_color_optical_frame
     crop_width: 512
     crop_height: 512
+    crop_offset_x: 0
+    crop_offset_y: 0
     expected_shots_per_image: 4
     max_queue_size: 16
     worker_threads: 1

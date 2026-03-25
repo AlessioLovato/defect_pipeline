@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(defect_map_pipeline)
+project(defect_localization)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,7 +31,7 @@ find_package(OpenCV REQUIRED)
 
 # Detectron2 installation with colcon build if not already pre-installed
 option(
-  DEFECT_MAP_PIPELINE_INSTALL_DETECTRON2
+  DEFECT_LOCALIZATION_INSTALL_DETECTRON2
   "Install bundled detectron2 with pip during colcon build when missing"
   ON
 )
@@ -48,8 +48,8 @@ set(
   "Torch version required before installing detectron2"
 )
 
-if(DEFECT_MAP_PIPELINE_INSTALL_DETECTRON2)
-  set(DETECTRON2_BUNDLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/defect_map_pipeline/detectron2")
+if(DEFECT_LOCALIZATION_INSTALL_DETECTRON2)
+  set(DETECTRON2_BUNDLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/defect_localization/detectron2")
   if(EXISTS "${DETECTRON2_BUNDLED_DIR}/setup.py")
     execute_process(
       COMMAND ${Python3_EXECUTABLE} -c "import detectron2"
@@ -92,20 +92,20 @@ endif()
 
 ament_python_install_package(${PROJECT_NAME})
 
-add_library(defect_map_pipeline_component SHARED
-  src/defect_map_pipeline_node.cpp
+add_library(defect_localization_component SHARED
+  src/defect_localization_node.cpp
 )
 
-target_include_directories(defect_map_pipeline_component PUBLIC
+target_include_directories(defect_localization_component PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(defect_map_pipeline_component
+target_link_libraries(defect_localization_component
   ${OpenCV_LIBS}
 )
 
-ament_target_dependencies(defect_map_pipeline_component
+ament_target_dependencies(defect_localization_component
   builtin_interfaces
   cv_bridge
   defect_map_interfaces
@@ -120,22 +120,22 @@ ament_target_dependencies(defect_map_pipeline_component
   tf2_ros
 )
 
-rclcpp_components_register_node(defect_map_pipeline_component
-  PLUGIN "defect_map_pipeline::DefectMapPipelineNode"
-  EXECUTABLE defect_map_pipeline_component_node
+rclcpp_components_register_node(defect_localization_component
+  PLUGIN "defect_localization::DefectLocalizationNode"
+  EXECUTABLE defect_localization_component_node
 )
 
-add_executable(defect_map_pipeline_node
-  src/defect_map_pipeline_main.cpp
+add_executable(defect_localization_node
+  src/defect_localization_main.cpp
 )
-target_link_libraries(defect_map_pipeline_node
-  defect_map_pipeline_component
+target_link_libraries(defect_localization_node
+  defect_localization_component
 )
-ament_target_dependencies(defect_map_pipeline_node
+ament_target_dependencies(defect_localization_node
   rclcpp
 )
 
-install(TARGETS defect_map_pipeline_component defect_map_pipeline_node
+install(TARGETS defect_localization_component defect_localization_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -150,7 +150,6 @@ install(PROGRAMS
   scripts/prediction_visualizer_node.py
   examples/request_prediction.py
   examples/capture_four_shots.sh
-  examples/build_and_get_map.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 
