@@ -93,7 +93,7 @@ endif()
 ament_python_install_package(${PROJECT_NAME})
 
 add_library(defect_localization_component SHARED
-  src/defect_localization_node.cpp
+  src/defect_localization/defect_localization_node.cpp
 )
 
 target_include_directories(defect_localization_component PUBLIC
@@ -126,7 +126,7 @@ rclcpp_components_register_node(defect_localization_component
 )
 
 add_executable(defect_localization_node
-  src/defect_localization_main.cpp
+  src/defect_localization/defect_localization_main.cpp
 )
 target_link_libraries(defect_localization_node
   defect_localization_component
