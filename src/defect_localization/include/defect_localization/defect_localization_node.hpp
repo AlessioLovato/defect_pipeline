@@ -277,7 +277,7 @@ private:
    * @param defects Defect batch to write.
    * @param status_code Returned writer status code.
    * @param status_message Returned writer status text.
-   * @return True when accepted by map node.
+   * @return True when accepted by map node, including one UID-resync retry.
    */
   bool sendDefectsToMap(
     const std::vector<defect_map_interfaces::msg::DefectEntry> & defects,

@@ -770,41 +770,76 @@ bool DefectLocalizationNode::sendDefectsToMap(
     return false;
   }
 
-  auto request = std::make_shared<defect_map_interfaces::srv::AddDefects::Request>();
-  request->defects = defects;
+  const auto syncUidCounter = [this](uint64_t latest_uid) {
+      next_uid_.store(latest_uid + 1U, std::memory_order_relaxed);
+    };
+  const auto callAddDefects =
+    [this](
+      const std::vector<defect_map_interfaces::msg::DefectEntry> & request_defects,
+      std::string & call_status_code,
+      std::string & call_status_message)
+    -> defect_map_interfaces::srv::AddDefects::Response::SharedPtr
+    {
+      auto request = std::make_shared<defect_map_interfaces::srv::AddDefects::Request>();
+      request->defects = request_defects;
 
-  auto future = add_defects_client_->async_send_request(request);
-  if (future.wait_for(std::chrono::milliseconds(map_write_timeout_ms_)) != std::future_status::ready) {
-    status_code = "TIMEOUT";
-    status_message = "AddDefects response timeout";
-    return false;
-  }
+      auto future = add_defects_client_->async_send_request(request);
+      if (
+        future.wait_for(std::chrono::milliseconds(map_write_timeout_ms_)) !=
+        std::future_status::ready)
+      {
+        call_status_code = "TIMEOUT";
+        call_status_message = "AddDefects response timeout";
+        return nullptr;
+      }
 
-  auto response = future.get();
+      auto response = future.get();
+      if (!response) {
+        call_status_code = "NO_RESPONSE";
+        call_status_message = "AddDefects response is null";
+        return nullptr;
+      }
+
+      call_status_code = response->status_code;
+      call_status_message = response->message;
+      return response;
+    };
+
+  auto response = callAddDefects(defects, status_code, status_message);
   if (!response) {
-    status_code = "NO_RESPONSE";
-    status_message = "AddDefects response is null";
     return false;
   }
-
-  status_code = response->status_code;
-  status_message = response->message;
 
   if (!response->accepted) {
     if (response->status_code == "UID_OUT_OF_SYNC") {
-      // Keep pipeline writer counter aligned with map-owner feedback.
-      const uint64_t target = response->latest_uid + 1U;
-      uint64_t current = next_uid_.load(std::memory_order_relaxed);
-      while (current < target &&
-        !next_uid_.compare_exchange_weak(current, target, std::memory_order_relaxed)) {}
+      // Keep pipeline writer counter aligned with map-owner feedback, including clear/reset.
+      syncUidCounter(response->latest_uid);
+
+      auto retried_defects = defects;
+      uint64_t retried_uid = response->latest_uid + 1U;
+      for (auto & defect : retried_defects) {
+        defect.uid = retried_uid++;
+      }
+
+      response = callAddDefects(retried_defects, status_code, status_message);
+      if (!response) {
+        return false;
+      }
+
+      if (!response->accepted) {
+        if (response->status_code == "UID_OUT_OF_SYNC") {
+          syncUidCounter(response->latest_uid);
+        }
+        return false;
+      }
+
+      syncUidCounter(response->latest_uid);
+      return true;
     }
     return false;
   }
 
-  const uint64_t target = response->latest_uid + 1U;
-  uint64_t current = next_uid_.load(std::memory_order_relaxed);
-  while (current < target &&
-    !next_uid_.compare_exchange_weak(current, target, std::memory_order_relaxed)) {}
+  syncUidCounter(response->latest_uid);
 
   return true;
 }
@@ -935,6 +970,7 @@ void DefectLocalizationNode::processJob(const CaptureJob & job)
     defect_map_interfaces::msg::DefectEntry entry;
     entry.uid = nextUid();
     entry.cluster = false;
+    entry.frame_id = base_frame_;
     entry.zone_id = job.image_id;
     entry.label = inst.label;
     entry.score = inst.score;

@@ -1,0 +1,10 @@
+defect_map:
+  ros__parameters:
+    default_map_path: ""
+    autoload_on_startup: false
+    save_pretty_json: true
+    log_snapshot_sizes: false
+    voxel_size_m: 0.01
+    class_names: ['positive', 'negative', 'line', 'crack', 'wood', 'dent']
+    debug_cloud_default_frame_id: world
+    max_service_wait_ms: 2000

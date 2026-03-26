@@ -105,11 +105,23 @@ add_library(defect_localization_component SHARED
   src/defect_localization/defect_localization_node.cpp
 )
 
+add_library(defect_map_component SHARED
+  src/defect_map/clusterer_mock.cpp
+  src/defect_map/defect_map_node.cpp
+  src/defect_map/json_persistence.cpp
+  src/defect_map/map_store.cpp
+)
+
 add_library(defect_localization_mock_support STATIC
   src/defect_localization/mock_image_catalog.cpp
 )
 
 target_include_directories(defect_localization_component PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(defect_map_component PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
@@ -140,6 +152,13 @@ ament_target_dependencies(defect_localization_component
   tf2_ros
 )
 
+ament_target_dependencies(defect_map_component
+  defect_map_interfaces
+  rclcpp
+  rclcpp_components
+  sensor_msgs
+)
+
 ament_target_dependencies(defect_localization_mock_support
   ament_index_cpp
 )
@@ -149,6 +168,11 @@ rclcpp_components_register_node(defect_localization_component
   EXECUTABLE defect_localization_component_node
 )
 
+rclcpp_components_register_node(defect_map_component
+  PLUGIN "defect_localization::DefectMapNode"
+  EXECUTABLE defect_map_component_node
+)
+
 add_executable(defect_localization_node
   src/defect_localization/defect_localization_main.cpp
 )
@@ -156,6 +180,16 @@ target_link_libraries(defect_localization_node
   defect_localization_component
 )
 ament_target_dependencies(defect_localization_node
+  rclcpp
+)
+
+add_executable(defect_map_node
+  src/defect_map/defect_map_main.cpp
+)
+target_link_libraries(defect_map_node
+  defect_map_component
+)
+ament_target_dependencies(defect_map_node
   rclcpp
 )
 
@@ -189,8 +223,10 @@ ament_target_dependencies(mock_snapshot_orchestrator
 
 install(TARGETS
   defect_localization_component
+  defect_map_component
   defect_localization_mock_support
   defect_localization_node
+  defect_map_node
   mock_realsense_node
   mock_snapshot_orchestrator
   ARCHIVE DESTINATION lib
@@ -205,6 +241,7 @@ install(DIRECTORY include/
 install(PROGRAMS
   scripts/detectron2_predictor_node.py
   scripts/prediction_visualizer_node.py
+  examples/clear_defect_map.sh
   examples/request_prediction.py
   examples/capture_four_shots.sh
   DESTINATION lib/${PROJECT_NAME}

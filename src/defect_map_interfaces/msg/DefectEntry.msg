@@ -1,5 +1,6 @@
 uint64 uid
 bool cluster
+string frame_id
 string zone_id
 string label
 float32 score
