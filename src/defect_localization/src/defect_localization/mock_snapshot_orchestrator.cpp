@@ -36,7 +36,8 @@ public:
     declare_parameter<int>("max_images", 2);
     declare_parameter<std::string>("mock_camera_node_name", "/mock_realsense");
     declare_parameter<std::string>("capture_service_name", "/defect_localization/capture_shot");
-    declare_parameter<int>("publish_settle_ms", 250);
+    declare_parameter<int>("publish_settle_ms", 500);
+    declare_parameter<int>("image_id_delay_ms", 2000);
     declare_parameter<int>("request_timeout_ms", 3000);
     declare_parameter<int>("service_wait_timeout_ms", 5000);
     declare_parameter<int>("max_retries_per_shot", 3);
@@ -45,6 +46,7 @@ public:
     const auto expected_shots = static_cast<int>(get_parameter("expected_shots_per_image").as_int());
     max_images_ = static_cast<int>(get_parameter("max_images").as_int());
     publish_settle_ms_ = static_cast<int>(get_parameter("publish_settle_ms").as_int());
+    image_id_delay_ms_ = static_cast<int>(get_parameter("image_id_delay_ms").as_int());
     request_timeout_ms_ = static_cast<int>(get_parameter("request_timeout_ms").as_int());
     service_wait_timeout_ms_ =
       static_cast<int>(get_parameter("service_wait_timeout_ms").as_int());
@@ -120,6 +122,15 @@ public:
             max_retries_per_shot_);
           return 1;
         }
+      }
+
+      if (image_id_delay_ms_ > 0 && image_index + 1 < image_count) {
+        RCLCPP_INFO(
+          get_logger(),
+          "Waiting %d ms before next image_id after %s",
+          image_id_delay_ms_,
+          image_set.image_id.c_str());
+        rclcpp::sleep_for(std::chrono::milliseconds(image_id_delay_ms_));
       }
     }
 
@@ -227,6 +238,7 @@ private:
   }
 
   int publish_settle_ms_{250};
+  int image_id_delay_ms_{0};
   int request_timeout_ms_{3000};
   int service_wait_timeout_ms_{5000};
   int max_retries_per_shot_{3};

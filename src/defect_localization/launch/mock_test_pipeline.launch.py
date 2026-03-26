@@ -10,6 +10,7 @@ def generate_launch_description():
     pkg_share = FindPackageShare('defect_localization')
 
     pipeline_launch = PathJoinSubstitution([pkg_share, 'launch', 'pipeline.launch.py'])
+    defect_map_launch = PathJoinSubstitution([pkg_share, 'launch', 'defect_map.launch.py'])
     prediction_visualizer_launch = PathJoinSubstitution(
         [pkg_share, 'launch', 'prediction_with_visualizer.launch.py']
     )
@@ -26,6 +27,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'prediction_params_file',
             default_value=PathJoinSubstitution([pkg_share, 'config', 'prediction.yaml']),
+        ),
+        DeclareLaunchArgument(
+            'defect_map_params_file',
+            default_value=PathJoinSubstitution([pkg_share, 'config', 'defect_map.yaml']),
         ),
         DeclareLaunchArgument(
             'model_config_path',
@@ -74,6 +79,12 @@ def generate_launch_description():
                 'model_weights_path': LaunchConfiguration('model_weights_path'),
                 'visualizer_service_name': LaunchConfiguration('visualizer_service_name'),
                 'output_topic': LaunchConfiguration('output_topic'),
+            }.items(),
+        ),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(defect_map_launch),
+            launch_arguments={
+                'params_file': LaunchConfiguration('defect_map_params_file'),
             }.items(),
         ),
         IncludeLaunchDescription(

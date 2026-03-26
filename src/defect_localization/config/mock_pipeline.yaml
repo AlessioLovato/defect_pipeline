@@ -20,7 +20,7 @@ defect_localization:
     sync_queue_size: 30
     map_add_defects_service_name: /defect_map/add_defects
     voxel_size_m: 0.01
-    preprocess_mode: curvature
+    preprocess_mode: composite
     light_order: [left, bottom, right, top]
     ps_curv_sigma: 60.0
     ps_height_sigma: 40.0

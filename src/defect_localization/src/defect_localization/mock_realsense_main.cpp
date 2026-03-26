@@ -49,7 +49,7 @@ public:
     declare_parameter<std::string>("active_image_id", "");
     declare_parameter<int>("active_shot_id", 1);
     declare_parameter<double>("publish_rate_hz", 5.0);
-    declare_parameter<double>("depth_meters", 1.0);
+    declare_parameter<double>("depth_meters", 0.35);
     declare_parameter<double>("days_between_image_ids", 0.0);
     declare_parameter<double>("meters_left_per_image_id", 0.26);
     declare_parameter<double>("camera_fx", 0.0);
