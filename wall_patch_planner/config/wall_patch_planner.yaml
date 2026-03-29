@@ -1,0 +1,19 @@
+wall_patch_planner:
+  ros__parameters:
+    cloud_topic: /interior_wall/wall_planes_cloud
+    camera_info_topic: /camera/camera_info
+    output_pose_topic: /wall_patch_planner/poses
+    output_debug_cloud_topic: /wall_patch_planner/debug_cloud
+    output_marker_topic: /wall_patch_planner/debug_markers
+    world_frame: map
+    camera_frame_prefix: wall_patch
+    selected_room_id: 1
+    selected_wall_ids: [1,2,3]
+    plane_label_stride: 1000
+    distance_to_wall: 0.35
+    overlap: 0.0
+    roi_width_px: 768.0
+    roi_height_px: 432.0
+    roi_center_u_offset_px: 0.0
+    roi_center_v_offset_px: 0.0
+    max_tf_frames: 512

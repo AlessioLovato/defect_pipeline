@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>Modular ROS 2 package for interior point cloud preprocessing, room clustering, semantic wall extraction, planar wall segmentation, and JSON export.</description>
 
-  <maintainer email="you@example.com">OpenAI</maintainer>
+  <maintainer email="alessio.lovato@iit.it">Alessio Lovato</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

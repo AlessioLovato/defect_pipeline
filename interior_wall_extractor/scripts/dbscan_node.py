@@ -5,6 +5,7 @@ from typing import List
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from sklearn.cluster import DBSCAN
@@ -56,8 +57,12 @@ class DbscanNode(Node):
         pts = np.asarray(raw_points)
         if pts.dtype.names:
             pts = np.column_stack((pts['x'], pts['y'], pts['z']))
-        elif pts.ndim == 1:
-            pts = pts.reshape((-1, 3))
+        elif pts.ndim == 2 and pts.shape[1] >= 3:
+            pts = pts[:, :3]
+        else:
+            # read_points() may yield tuple-like objects, which NumPy stores as a
+            # 1D object array. Extract XYZ explicitly instead of reshaping.
+            pts = np.asarray([(p[0], p[1], p[2]) for p in raw_points], dtype=np.float32)
 
         return pts.astype(np.float32, copy=False)
 
@@ -94,6 +99,9 @@ class DbscanNode(Node):
         return point_cloud2.create_cloud(header, fields, points)
 
     def cloud_callback(self, msg: PointCloud2) -> None:
+        if not rclpy.ok():
+            return
+
         xyz = self._read_xyz(msg)
         if xyz.shape[0] == 0:
             self.get_logger().warning('Received empty cloud')
@@ -101,7 +109,15 @@ class DbscanNode(Node):
 
         xy = xyz[:, :2]
         model = DBSCAN(eps=self.eps, min_samples=self.min_points)
-        raw_labels = model.fit_predict(xy)
+        try:
+            raw_labels = model.fit_predict(xy)
+        except KeyboardInterrupt:
+            # Ctrl+C can arrive while scikit-learn is inside neighbor search.
+            # Treat that as a normal shutdown path instead of a node crash.
+            if rclpy.ok():
+                raise
+            self.get_logger().info('DBSCAN interrupted during shutdown')
+            return
 
         valid_mask = raw_labels >= 0
         if not np.any(valid_mask):
@@ -142,9 +158,14 @@ class DbscanNode(Node):
 def main() -> None:
     rclpy.init()
     node = DbscanNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
