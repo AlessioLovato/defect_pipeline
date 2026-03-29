@@ -1,0 +1,6 @@
+sensor_msgs/PointCloud2 cloud
+bool save_debug_outputs
+string request_id
+---
+bool success
+string message
