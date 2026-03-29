@@ -35,7 +35,7 @@ find_package(OpenCV REQUIRED)
 option(
   DEFECT_LOCALIZATION_INSTALL_DETECTRON2
   "Install bundled detectron2 with pip during colcon build when missing"
-  OFF
+  ON
 )
 set(
   TORCH_VERSION
