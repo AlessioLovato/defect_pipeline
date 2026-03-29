@@ -5,6 +5,7 @@ world_pointcloud_generator:
     topic_name: /synthetic_world/points
     resolution: 0.10
     surface_mode: interior_vertical
+    include_floor_and_ceiling: false
     bbox_min: [-20.0, -20.0, -2.0]
     bbox_max: [20.0, 20.0, 10.0]
     publish_period_sec: 1.0

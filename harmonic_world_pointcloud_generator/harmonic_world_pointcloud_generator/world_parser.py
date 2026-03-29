@@ -110,6 +110,57 @@ def sample_box_major_vertical_faces(size: np.ndarray, resolution: float) -> tupl
     return unique_surface_samples(np.vstack(points), np.vstack(normals))
 
 
+def sample_box_all_vertical_faces(size: np.ndarray, resolution: float) -> tuple[np.ndarray, np.ndarray]:
+    sx, sy, sz = size.tolist()
+    xs = np.arange(-sx / 2.0, sx / 2.0 + resolution * 0.5, resolution)
+    ys = np.arange(-sy / 2.0, sy / 2.0 + resolution * 0.5, resolution)
+    zs = np.arange(-sz / 2.0, sz / 2.0 + resolution * 0.5, resolution)
+
+    points: List[np.ndarray] = []
+    normals: List[np.ndarray] = []
+
+    xv, zv = np.meshgrid(xs, zs, indexing='xy')
+    count_x = xv.size
+    points.append(np.column_stack([xv.ravel(), np.full(count_x, sy / 2.0), zv.ravel()]))
+    normals.append(np.tile(np.array([0.0, 1.0, 0.0], dtype=float), (count_x, 1)))
+    points.append(np.column_stack([xv.ravel(), np.full(count_x, -sy / 2.0), zv.ravel()]))
+    normals.append(np.tile(np.array([0.0, -1.0, 0.0], dtype=float), (count_x, 1)))
+
+    yv, zv = np.meshgrid(ys, zs, indexing='xy')
+    count_y = yv.size
+    points.append(np.column_stack([np.full(count_y, sx / 2.0), yv.ravel(), zv.ravel()]))
+    normals.append(np.tile(np.array([1.0, 0.0, 0.0], dtype=float), (count_y, 1)))
+    points.append(np.column_stack([np.full(count_y, -sx / 2.0), yv.ravel(), zv.ravel()]))
+    normals.append(np.tile(np.array([-1.0, 0.0, 0.0], dtype=float), (count_y, 1)))
+
+    return unique_surface_samples(np.vstack(points), np.vstack(normals))
+
+
+def sample_box_major_horizontal_faces(size: np.ndarray, resolution: float) -> tuple[np.ndarray, np.ndarray]:
+    sx, sy, sz = size.tolist()
+    xs = np.arange(-sx / 2.0, sx / 2.0 + resolution * 0.5, resolution)
+    ys = np.arange(-sy / 2.0, sy / 2.0 + resolution * 0.5, resolution)
+
+    area_z = sx * sy
+    area_x = sy * sz
+    area_y = sx * sz
+    max_area = max(area_x, area_y, area_z)
+    if area_z < 0.95 * max_area:
+        return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=float)
+
+    xv, yv = np.meshgrid(xs, ys, indexing='xy')
+    count = xv.size
+    points = np.vstack([
+        np.column_stack([xv.ravel(), yv.ravel(), np.full(count, sz / 2.0)]),
+        np.column_stack([xv.ravel(), yv.ravel(), np.full(count, -sz / 2.0)]),
+    ])
+    normals = np.vstack([
+        np.tile(np.array([0.0, 0.0, 1.0], dtype=float), (count, 1)),
+        np.tile(np.array([0.0, 0.0, -1.0], dtype=float), (count, 1)),
+    ])
+    return unique_surface_samples(points, normals)
+
+
 def sample_cylinder(radius: float, length: float, resolution: float) -> np.ndarray:
     circumference = max(8, int(math.ceil((2.0 * math.pi * radius) / resolution)))
     angles = np.linspace(0.0, 2.0 * math.pi, circumference, endpoint=False)
@@ -193,6 +244,7 @@ def parse_world_to_pointcloud(
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
     surface_mode: str = 'all',
+    include_floor_and_ceiling: bool = False,
 ) -> np.ndarray:
     tree = ET.parse(Path(world_sdf_path))
     root = tree.getroot()
@@ -223,7 +275,24 @@ def parse_world_to_pointcloud(
         return unique_rows(np.vstack(collected)).astype(np.float32)
 
     if surface_mode == 'interior_vertical':
-        return _parse_world_to_interior_vertical_pointcloud(primitives, resolution, bbox_min, bbox_max)
+        return _parse_world_to_interior_pointcloud(
+            primitives,
+            resolution,
+            bbox_min,
+            bbox_max,
+            keep_caps=False,
+            include_floor_and_ceiling=include_floor_and_ceiling,
+        )
+
+    if surface_mode == 'interior_vertical_with_caps':
+        return _parse_world_to_interior_pointcloud(
+            primitives,
+            resolution,
+            bbox_min,
+            bbox_max,
+            keep_caps=True,
+            include_floor_and_ceiling=include_floor_and_ceiling,
+        )
 
     raise ValueError(f"Unsupported surface_mode '{surface_mode}'")
 
@@ -288,11 +357,32 @@ def _sample_primitive_points(primitive: Primitive, resolution: float) -> np.ndar
     return np.zeros((0, 3), dtype=float)
 
 
-def _sample_primitive_vertical_surface_samples(primitive: Primitive, resolution: float) -> tuple[np.ndarray, np.ndarray]:
+def _sample_primitive_vertical_surface_samples(
+    primitive: Primitive,
+    resolution: float,
+    keep_caps: bool,
+) -> tuple[np.ndarray, np.ndarray]:
     if primitive.kind == 'box' and primitive.size is not None:
+        if keep_caps:
+            return sample_box_all_vertical_faces(primitive.size, resolution)
         return sample_box_major_vertical_faces(primitive.size, resolution)
     if primitive.kind == 'cylinder':
         return sample_cylinder_mantle(primitive.radius, primitive.length, resolution)
+    return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=float)
+
+
+def _sample_primitive_horizontal_surface_samples(primitive: Primitive, resolution: float) -> tuple[np.ndarray, np.ndarray]:
+    if primitive.kind == 'box' and primitive.size is not None:
+        return sample_box_major_horizontal_faces(primitive.size, resolution)
+    if primitive.kind == 'plane' and primitive.size is not None:
+        sx, sy, _ = primitive.size.tolist()
+        xs = np.arange(-sx / 2.0, sx / 2.0 + resolution * 0.5, resolution)
+        ys = np.arange(-sy / 2.0, sy / 2.0 + resolution * 0.5, resolution)
+        xv, yv = np.meshgrid(xs, ys, indexing='xy')
+        count = xv.size
+        points = np.column_stack([xv.ravel(), yv.ravel(), np.zeros(count, dtype=float)])
+        normals = np.tile(np.array([0.0, 0.0, 1.0], dtype=float), (count, 1))
+        return unique_surface_samples(points, normals)
     return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=float)
 
 
@@ -306,11 +396,13 @@ def _transform_normals(normals: np.ndarray, tf: np.ndarray) -> np.ndarray:
     return world_normals / lengths
 
 
-def _parse_world_to_interior_vertical_pointcloud(
+def _parse_world_to_interior_pointcloud(
     primitives: List[Primitive],
     resolution: float,
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
+    keep_caps: bool,
+    include_floor_and_ceiling: bool,
 ) -> np.ndarray:
     grid_resolution = float(np.clip(resolution * 0.5, 0.02, 0.05))
     interior_free = _compute_interior_free_mask(primitives, bbox_min, bbox_max, grid_resolution)
@@ -318,7 +410,11 @@ def _parse_world_to_interior_vertical_pointcloud(
 
     collected: List[np.ndarray] = []
     for primitive in primitives:
-        points_local, normals_local = _sample_primitive_vertical_surface_samples(primitive, resolution)
+        points_local, normals_local = _sample_primitive_vertical_surface_samples(
+            primitive,
+            resolution,
+            keep_caps,
+        )
         if points_local.size == 0:
             continue
 
@@ -333,6 +429,31 @@ def _parse_world_to_interior_vertical_pointcloud(
         keep_mask = _surface_points_adjacent_to_interior(points_world, normals_world, interior_free, bbox_min, bbox_max, grid_resolution, offset_distance)
         if np.any(keep_mask):
             collected.append(points_world[keep_mask])
+
+    if include_floor_and_ceiling:
+        for primitive in primitives:
+            points_local, normals_local = _sample_primitive_horizontal_surface_samples(primitive, resolution)
+            if points_local.size == 0:
+                continue
+
+            points_world = transform_points(points_local, primitive.world_tf)
+            normals_world = _transform_normals(normals_local, primitive.world_tf)
+            crop_mask = np.all(points_world >= bbox_min, axis=1) & np.all(points_world <= bbox_max, axis=1)
+            if not np.any(crop_mask):
+                continue
+
+            points_world = points_world[crop_mask]
+            normals_world = normals_world[crop_mask]
+            keep_mask = _horizontal_surface_points_over_interior(
+                points_world,
+                normals_world,
+                interior_free,
+                bbox_min,
+                bbox_max,
+                grid_resolution,
+            )
+            if np.any(keep_mask):
+                collected.append(points_world[keep_mask])
 
     if not collected:
         return np.zeros((0, 3), dtype=np.float32)
@@ -512,6 +633,37 @@ def _surface_points_adjacent_to_interior(
 
     ix = np.floor((probe_points[valid, 0] - bbox_min[0]) / grid_resolution).astype(int)
     iy = np.floor((probe_points[valid, 1] - bbox_min[1]) / grid_resolution).astype(int)
+    ix = np.clip(ix, 0, interior_free.shape[1] - 1)
+    iy = np.clip(iy, 0, interior_free.shape[0] - 1)
+    keep[valid] = interior_free[iy, ix]
+    return keep
+
+
+def _horizontal_surface_points_over_interior(
+    points_world: np.ndarray,
+    normals_world: np.ndarray,
+    interior_free: np.ndarray,
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
+    grid_resolution: float,
+) -> np.ndarray:
+    if points_world.size == 0:
+        return np.zeros((0,), dtype=bool)
+
+    horizontal = np.abs(normals_world[:, 2]) >= 0.9
+    valid = (
+        horizontal &
+        (points_world[:, 0] >= bbox_min[0]) &
+        (points_world[:, 0] <= bbox_max[0]) &
+        (points_world[:, 1] >= bbox_min[1]) &
+        (points_world[:, 1] <= bbox_max[1])
+    )
+    keep = np.zeros(points_world.shape[0], dtype=bool)
+    if not np.any(valid):
+        return keep
+
+    ix = np.floor((points_world[valid, 0] - bbox_min[0]) / grid_resolution).astype(int)
+    iy = np.floor((points_world[valid, 1] - bbox_min[1]) / grid_resolution).astype(int)
     ix = np.clip(ix, 0, interior_free.shape[1] - 1)
     iy = np.clip(iy, 0, interior_free.shape[0] - 1)
     keep[valid] = interior_free[iy, ix]

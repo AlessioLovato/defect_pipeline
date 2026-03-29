@@ -20,6 +20,7 @@ class WorldPointCloudGeneratorNode(Node):
         self.declare_parameter('topic_name', '/synthetic_world/points')
         self.declare_parameter('resolution', 0.10)
         self.declare_parameter('surface_mode', 'all')
+        self.declare_parameter('include_floor_and_ceiling', False)
         self.declare_parameter('bbox_min', [-20.0, -20.0, -2.0])
         self.declare_parameter('bbox_max', [20.0, 20.0, 10.0])
         self.declare_parameter('publish_period_sec', 1.0)
@@ -56,13 +57,24 @@ class WorldPointCloudGeneratorNode(Node):
         world_sdf_path = self.get_parameter('world_sdf_path').get_parameter_value().string_value
         resolution = self.get_parameter('resolution').get_parameter_value().double_value
         surface_mode = self.get_parameter('surface_mode').get_parameter_value().string_value
+        include_floor_and_ceiling = self.get_parameter('include_floor_and_ceiling').get_parameter_value().bool_value
         bbox_min = np.array(self.get_parameter('bbox_min').value, dtype=float)
         bbox_max = np.array(self.get_parameter('bbox_max').value, dtype=float)
         auto_save = self.get_parameter('auto_save_pcd').get_parameter_value().bool_value
         pcd_path = self.get_parameter('pcd_path').get_parameter_value().string_value
-        return self._generate(world_sdf_path, resolution, surface_mode, bbox_min, bbox_max, auto_save, pcd_path)
+        return self._generate(
+            world_sdf_path,
+            resolution,
+            surface_mode,
+            include_floor_and_ceiling,
+            bbox_min,
+            bbox_max,
+            auto_save,
+            pcd_path,
+        )
 
     def _generate(self, world_sdf_path: str, resolution: float, surface_mode: str,
+                  include_floor_and_ceiling: bool,
                   bbox_min: np.ndarray, bbox_max: np.ndarray,
                   save_pcd: bool, pcd_path: str) -> tuple[bool, str, int]:
         if not world_sdf_path:
@@ -73,7 +85,14 @@ class WorldPointCloudGeneratorNode(Node):
             return False, 'resolution must be > 0', 0
 
         try:
-            points = parse_world_to_pointcloud(world_sdf_path, resolution, bbox_min, bbox_max, surface_mode)
+            points = parse_world_to_pointcloud(
+                world_sdf_path,
+                resolution,
+                bbox_min,
+                bbox_max,
+                surface_mode,
+                include_floor_and_ceiling,
+            )
         except Exception as exc:  # pragma: no cover - defensive logging path
             return False, f'failed to parse world: {exc}', 0
 
@@ -84,7 +103,10 @@ class WorldPointCloudGeneratorNode(Node):
         if save_pcd:
             save_ascii_pcd(points, pcd_path)
 
-        return True, f"generated {self.current_count} points using surface_mode='{surface_mode}'", self.current_count
+        return True, (
+            f"generated {self.current_count} points using surface_mode='{surface_mode}', "
+            f"include_floor_and_ceiling={include_floor_and_ceiling}"
+        ), self.current_count
 
 def main() -> None:
     rclpy.init()
