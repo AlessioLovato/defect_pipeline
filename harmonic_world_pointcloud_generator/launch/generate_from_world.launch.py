@@ -9,7 +9,8 @@ def generate_launch_description():
         DeclareLaunchArgument('world_sdf_path', default_value='/home/ubuntu/ws/src/defect_pipeline/harmonic_world_pointcloud_generator/worlds/office.sdf'),
         DeclareLaunchArgument('topic_name', default_value='/synthetic_world/points'),
         DeclareLaunchArgument('frame_id', default_value='map'),
-        DeclareLaunchArgument('resolution', default_value='0.1'),
+        DeclareLaunchArgument('resolution', default_value='0.05'),
+        DeclareLaunchArgument('surface_mode', default_value='interior_vertical'),
         Node(
             package='harmonic_world_pointcloud_generator',
             executable='generator_node',
@@ -20,9 +21,10 @@ def generate_launch_description():
                 'topic_name': LaunchConfiguration('topic_name'),
                 'frame_id': LaunchConfiguration('frame_id'),
                 'resolution': LaunchConfiguration('resolution'),
+                'surface_mode': LaunchConfiguration('surface_mode'),
                 'auto_generate_on_startup': True,
-                'bbox_min': [-15.0, -10.0, -2.0],
-                'bbox_max': [10.0, 10.0, 10.0],
+                'bbox_min': [-15.0, -10.0, -0.1],
+                'bbox_max': [10.0, 10.0, 5.0],
             }],
         )
     ])
