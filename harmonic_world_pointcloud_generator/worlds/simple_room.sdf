@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<sdf version="1.8">
+  <world name="simple_room">
+    <model name="floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box><size>8 8 0.1</size></box>
+          </geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="wall_1">
+      <static>true</static>
+      <pose>0 4 1.5 0 0 0</pose>
+      <link name="link"><collision name="collision"><geometry><box><size>8 0.2 3.0</size></box></geometry></collision></link>
+    </model>
+    <model name="wall_2">
+      <static>true</static>
+      <pose>0 -4 1.5 0 0 0</pose>
+      <link name="link"><collision name="collision"><geometry><box><size>8 0.2 3.0</size></box></geometry></collision></link>
+    </model>
+    <model name="wall_3">
+      <static>true</static>
+      <pose>4 0 1.5 0 0 0</pose>
+      <link name="link"><collision name="collision"><geometry><box><size>0.2 8 3.0</size></box></geometry></collision></link>
+    </model>
+    <model name="wall_4">
+      <static>true</static>
+      <pose>-4 0 1.5 0 0 0</pose>
+      <link name="link"><collision name="collision"><geometry><box><size>0.2 8 3.0</size></box></geometry></collision></link>
+    </model>
+  </world>
+</sdf>
