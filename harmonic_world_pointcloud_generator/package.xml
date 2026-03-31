@@ -3,10 +3,11 @@
   <name>harmonic_world_pointcloud_generator</name>
   <version>0.1.0</version>
   <description>Generate and publish a synthetic world point cloud from an SDF world for Gazebo Harmonic using a ROS 2 service.</description>
-  <maintainer email="user@example.com">OpenAI</maintainer>
+  <maintainer email="alessio.lovato@iit.it">Alessio Lovato</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
@@ -19,6 +20,6 @@
   <test_depend>ament_lint_common</test_depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>
