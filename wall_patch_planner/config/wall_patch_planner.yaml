@@ -8,12 +8,18 @@ wall_patch_planner:
     world_frame: map
     camera_frame_prefix: wall_patch
     selected_room_id: 1
-    selected_wall_ids: [1,2,3]
+    selected_wall_ids: [3]
     plane_label_stride: 1000
-    distance_to_wall: 0.35
+    fov_distance: 0.30
+    wall_distance: 0.05
     overlap: 0.0
-    roi_width_px: 768.0
-    roi_height_px: 432.0
+    ee_size_x: 0.30
+    ee_size_y: 0.30
+    grid_resolution: 0.05
+    min_valid_roi_ratio: 0.4
+    min_new_coverage_ratio: 0.003
+    roi_width_px: 512.0
+    roi_height_px: 512.0
     roi_center_u_offset_px: 0.0
     roi_center_v_offset_px: 0.0
     max_tf_frames: 512

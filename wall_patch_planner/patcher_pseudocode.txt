@@ -1,0 +1,652 @@
+FUNCTION plan_wall_coverage(
+    pointcloud,
+    selected_room_id,
+    selected_wall_ids,
+    plane_label_stride,
+    camera_info,
+    params
+):
+
+INPUT:
+    pointcloud:
+        PointCloud2 with at least fields:
+            x, y, z, label
+        where:
+            room_id  = floor(label / plane_label_stride)
+            wall_id  = label % plane_label_stride
+
+    selected_room_id:
+        int
+
+    selected_wall_ids:
+        array<int>
+        # start with one wall, but support multiple
+
+    camera_info:
+        ROS CameraInfo
+
+    params:
+        distance_to_wall              # default 0.35 m
+        overlap_ratio                 # e.g. 0.10 .. 0.25
+        ee_size_x                     # 0.30 m
+        ee_size_y                     # 0.30 m
+        grid_resolution               # e.g. 0.01 .. 0.03 m
+        min_valid_roi_ratio           # e.g. 0.5 .. 0.8
+        min_new_coverage_ratio        # e.g. 0.05
+        roi_u_min, roi_u_max          # normalized image coords
+        roi_v_min, roi_v_max
+        world_up = (0,0,1)
+
+OUTPUT:
+    result:
+        dictionary indexed by wall_id
+        each entry contains:
+            poses: list of 6D poses
+            debug_data:
+                wall_frame
+                wall_mask
+                uncovered_mask
+                accepted_patch_polygons
+                accepted_roi_polygons
+
+--------------------------------------------------
+MAIN PROCEDURE
+
+    result = empty dictionary
+
+    FOR each target_wall_id in selected_wall_ids:
+
+        wall_points = FILTER_POINTS_FOR_ONE_WALL(
+            pointcloud,
+            selected_room_id,
+            target_wall_id,
+            plane_label_stride
+        )
+
+        IF wall_points is empty:
+            result[target_wall_id] = empty output
+            CONTINUE
+
+        wall_model = ESTIMATE_WALL_MODEL(wall_points, params.world_up)
+
+        wall_grid_data = BUILD_WALL_2D_REPRESENTATION(
+            wall_points,
+            wall_model,
+            params.grid_resolution
+        )
+
+        sensor_model = COMPUTE_SENSOR_AND_TOOL_FOOTPRINTS(
+            camera_info,
+            params.distance_to_wall,
+            params.roi_u_min, params.roi_u_max,
+            params.roi_v_min, params.roi_v_max,
+            params.ee_size_x,
+            params.ee_size_y
+        )
+
+        candidate_centers = GENERATE_VALID_CANDIDATE_CENTERS(
+            wall_grid_data,
+            sensor_model,
+            params
+        )
+
+        selected_patches = SELECT_PATCHES_FOR_COVERAGE(
+            candidate_centers,
+            wall_grid_data,
+            sensor_model,
+            params
+        )
+
+        poses = CONVERT_PATCHES_TO_6D_POSES(
+            selected_patches,
+            wall_model,
+            params.distance_to_wall
+        )
+
+        debug_data = BUILD_DEBUG_OUTPUT(
+            selected_patches,
+            wall_grid_data,
+            wall_model,
+            sensor_model
+        )
+
+        result[target_wall_id] = {
+            poses: poses,
+            debug_data: debug_data
+        }
+
+    RETURN result
+
+--------------------------------------------------
+FUNCTION FILTER_POINTS_FOR_ONE_WALL(
+    pointcloud,
+    selected_room_id,
+    target_wall_id,
+    plane_label_stride
+):
+
+    filtered = []
+
+    FOR each point p in pointcloud:
+        encoded_label = p.label
+
+        room_id = floor(encoded_label / plane_label_stride)
+        wall_id = encoded_label % plane_label_stride
+
+        IF room_id == selected_room_id AND wall_id == target_wall_id:
+            append p to filtered
+
+    RETURN filtered
+
+--------------------------------------------------
+FUNCTION ESTIMATE_WALL_MODEL(wall_points, world_up):
+
+    centroid = mean position of wall_points
+
+    plane = fit plane to wall_points
+    normal = normalized plane normal
+
+    # Make normal consistent if needed
+    # optional convention: force normal to point toward robot workspace later
+
+    # Build local wall frame:
+    # U axis = horizontal on wall
+    # V axis = vertical on wall
+    # N axis = wall normal
+    #
+    # For near-vertical walls:
+    U = normalize(cross(world_up, normal))
+
+    IF norm(U) is too small:
+        # fallback if wall normal is almost parallel to world_up
+        U = principal horizontal direction from PCA
+
+    V = normalize(cross(normal, U))
+    N = normal
+
+    RETURN {
+        centroid: centroid,
+        U: U,
+        V: V,
+        N: N
+    }
+
+--------------------------------------------------
+FUNCTION BUILD_WALL_2D_REPRESENTATION(
+    wall_points,
+    wall_model,
+    grid_resolution
+):
+
+    uv_points = []
+
+    FOR each 3D point p in wall_points:
+        delta = p - wall_model.centroid
+        u = dot(delta, wall_model.U)
+        v = dot(delta, wall_model.V)
+        append (u, v) to uv_points
+
+    bounds = compute min_u, max_u, min_v, max_v from uv_points
+
+    # Add a small margin around point extents for grid construction
+    bounds = expand bounds slightly by 1-2 grid cells
+
+    grid = allocate 2D grid over bounds at grid_resolution
+    # grid values:
+    #   1 = observed wall support
+    #   0 = empty
+
+    FOR each (u, v) in uv_points:
+        cell = uv_to_cell(u, v)
+        mark grid[cell] = 1
+
+    # Optional denoise:
+    # - small closing to connect tiny sampling gaps
+    # - small hole filling only for tiny voids caused by sparse pointcloud
+    grid = MORPHOLOGICAL_CLOSE_SMALL_GAPS(grid)
+    grid = FILL_TINY_HOLES_ONLY(grid)
+
+    # Build wall outer envelope:
+    # this represents the overall wall boundary and is used for hard boundary checks.
+    #
+    # IMPORTANT:
+    # - outer envelope is used for hard erosion
+    # - internal holes/windows are NOT eroded away from
+    #
+    outer_envelope = COMPUTE_OUTER_WALL_ENVELOPE(grid)
+
+    # coverage_mask is the real observed wall support:
+    # holes/windows stay empty here
+    coverage_mask = copy(grid)
+
+    RETURN {
+        uv_points: uv_points,
+        bounds: bounds,
+        outer_envelope: outer_envelope,
+        coverage_mask: coverage_mask,
+        grid_resolution: grid_resolution
+    }
+
+--------------------------------------------------
+FUNCTION COMPUTE_OUTER_WALL_ENVELOPE(grid):
+
+    # Purpose:
+    # Create a mask representing the external shape of the wall.
+    # Internal holes (windows/doors) should not break the outer envelope.
+    #
+    # Possible implementations:
+    # 1. Largest connected component + fill internal holes
+    # 2. 2D alpha shape / concave hull + rasterization
+    # 3. Convex hull if wall is simple, though this is less accurate
+    #
+    # Recommended practical approach:
+    # - keep largest connected wall component
+    # - fill internal holes
+    # - optionally smooth edges
+
+    largest_component = largest connected occupied region in grid
+    envelope = fill all internal holes inside largest_component
+    envelope = optional small smoothing
+
+    RETURN envelope
+
+--------------------------------------------------
+FUNCTION COMPUTE_SENSOR_AND_TOOL_FOOTPRINTS(
+    camera_info,
+    distance_to_wall,
+    roi_u_min, roi_u_max,
+    roi_v_min, roi_v_max,
+    ee_size_x,
+    ee_size_y
+):
+
+    fx = camera_info.K[0]
+    fy = camera_info.K[4]
+    img_width  = camera_info.width
+    img_height = camera_info.height
+
+    # Full image FoV
+    fov_x = 2 * atan(img_width  / (2 * fx))
+    fov_y = 2 * atan(img_height / (2 * fy))
+
+    # ROI normalized size
+    roi_scale_x = roi_u_max - roi_u_min
+    roi_scale_y = roi_v_max - roi_v_min
+
+    # Effective ROI FoV
+    roi_fov_x = fov_x * roi_scale_x
+    roi_fov_y = fov_y * roi_scale_y
+
+    # ROI footprint size on wall plane at distance_to_wall
+    roi_width  = 2 * distance_to_wall * tan(roi_fov_x / 2)
+    roi_height = 2 * distance_to_wall * tan(roi_fov_y / 2)
+
+    # ROI center offset in image coordinates
+    roi_center_u = 0.5 * (roi_u_min + roi_u_max)
+    roi_center_v = 0.5 * (roi_v_min + roi_v_max)
+
+    # Full-image center is (0.5, 0.5)
+    # Approximate offset of ROI center on the wall plane
+    #
+    # Positive offset means the ROI footprint center is shifted with respect
+    # to the optical axis footprint center.
+    #
+    # This approximation is fine for moderate FoV and frontal poses.
+    full_width_at_d  = 2 * distance_to_wall * tan(fov_x / 2)
+    full_height_at_d = 2 * distance_to_wall * tan(fov_y / 2)
+
+    roi_offset_u = (roi_center_u - 0.5) * full_width_at_d
+    roi_offset_v = (0.5 - roi_center_v) * full_height_at_d
+    # note: image v usually grows downward, wall V usually upward
+
+    # Tool footprint on wall
+    ee_width  = ee_size_x
+    ee_height = ee_size_y
+
+    # Hard boundary footprint:
+    # must stay inside the OUTER wall envelope
+    # to avoid exceeding wall limits with either camera support area or end effector
+    hard_width  = max(roi_width,  ee_width)
+    hard_height = max(roi_height, ee_height)
+
+    RETURN {
+        roi_width: roi_width,
+        roi_height: roi_height,
+        roi_offset_u: roi_offset_u,
+        roi_offset_v: roi_offset_v,
+        ee_width: ee_width,
+        ee_height: ee_height,
+        hard_width: hard_width,
+        hard_height: hard_height
+    }
+
+--------------------------------------------------
+FUNCTION GENERATE_VALID_CANDIDATE_CENTERS(
+    wall_grid_data,
+    sensor_model,
+    params
+):
+
+    candidates = []
+
+    # Hard boundary erosion applies ONLY to outer wall envelope
+    # Not to windows/holes.
+    #
+    # This creates a valid region for patch centers such that the full hard
+    # footprint stays inside the external wall limits.
+    valid_center_region = ERODE_OUTER_ENVELOPE_ONLY(
+        wall_grid_data.outer_envelope,
+        sensor_model.hard_width,
+        sensor_model.hard_height,
+        wall_grid_data.grid_resolution
+    )
+
+    # Candidate spacing is based on ROI footprint and desired overlap.
+    step_u = sensor_model.roi_width  * (1 - params.overlap_ratio)
+    step_v = sensor_model.roi_height * (1 - params.overlap_ratio)
+
+    # Iterate over grid in a structured way.
+    # You can use row-major or boustrophedon ordering.
+    FOR v from wall_grid_data.bounds.min_v to wall_grid_data.bounds.max_v step step_v:
+        FOR u from wall_grid_data.bounds.min_u to wall_grid_data.bounds.max_u step step_u:
+
+            IF cell(u,v) is not inside valid_center_region:
+                CONTINUE
+
+            candidate = {
+                center_u: u,
+                center_v: v
+            }
+
+            # Evaluate candidate now; only keep useful ones
+            eval = EVALUATE_CANDIDATE_PATCH(
+                candidate,
+                wall_grid_data,
+                sensor_model,
+                params
+            )
+
+            IF eval.is_valid:
+                candidate.roi_polygon = eval.roi_polygon
+                candidate.hard_polygon = eval.hard_polygon
+                candidate.covered_cells = eval.covered_cells
+                candidate.coverage_ratio = eval.coverage_ratio
+                append candidate to candidates
+
+    RETURN candidates
+
+--------------------------------------------------
+FUNCTION ERODE_OUTER_ENVELOPE_ONLY(
+    outer_envelope,
+    hard_width,
+    hard_height,
+    grid_resolution
+):
+
+    kernel_half_u_cells = ceil((hard_width  / 2) / grid_resolution)
+    kernel_half_v_cells = ceil((hard_height / 2) / grid_resolution)
+
+    eroded = morphological erosion of outer_envelope
+             with rectangular kernel:
+                 width  = 2 * kernel_half_u_cells + 1
+                 height = 2 * kernel_half_v_cells + 1
+
+    RETURN eroded
+
+--------------------------------------------------
+FUNCTION EVALUATE_CANDIDATE_PATCH(
+    candidate,
+    wall_grid_data,
+    sensor_model,
+    params
+):
+
+    center_u = candidate.center_u
+    center_v = candidate.center_v
+
+    # Hard polygon centered on candidate
+    hard_polygon = BUILD_RECTANGLE_POLYGON(
+        center_u,
+        center_v,
+        sensor_model.hard_width,
+        sensor_model.hard_height,
+        offset_u = 0,
+        offset_v = 0
+    )
+
+    # ROI polygon may be off-center due to cropped ROI
+    roi_polygon = BUILD_RECTANGLE_POLYGON(
+        center_u,
+        center_v,
+        sensor_model.roi_width,
+        sensor_model.roi_height,
+        offset_u = sensor_model.roi_offset_u,
+        offset_v = sensor_model.roi_offset_v
+    )
+
+    # Rule 1: hard polygon must lie inside OUTER envelope
+    IF hard_polygon is not fully inside wall_grid_data.outer_envelope:
+        RETURN { is_valid: false }
+
+    # Rule 2: windows/holes are NOT eroded against.
+    # Instead, evaluate how much REAL wall support is covered by the ROI polygon.
+    #
+    # coverage_mask contains only observed wall support.
+    covered_cells = all cells of coverage_mask inside roi_polygon
+    roi_cells     = all grid cells inside roi_polygon
+
+    IF roi_cells is empty:
+        RETURN { is_valid: false }
+
+    valid_count = number of occupied coverage_mask cells in roi_cells
+    total_count = number of cells in roi_cells
+
+    coverage_ratio = valid_count / total_count
+
+    # Candidate is accepted if enough ROI sees actual wall.
+    IF coverage_ratio < params.min_valid_roi_ratio:
+        RETURN { is_valid: false }
+
+    RETURN {
+        is_valid: true,
+        hard_polygon: hard_polygon,
+        roi_polygon: roi_polygon,
+        covered_cells: covered_cells,
+        coverage_ratio: coverage_ratio
+    }
+
+--------------------------------------------------
+FUNCTION SELECT_PATCHES_FOR_COVERAGE(
+    candidate_centers,
+    wall_grid_data,
+    sensor_model,
+    params
+):
+
+    # Goal:
+    # cover the observed wall support with as few useful patches as possible
+    # without creating a forbidden band around windows.
+    #
+    # We use a greedy set-cover style selection on the real coverage_mask.
+
+    uncovered_mask = copy(wall_grid_data.coverage_mask)
+    selected = []
+
+    LOOP:
+
+        best_candidate = NONE
+        best_gain = 0
+
+        FOR each candidate in candidate_centers:
+
+            gain_cells = candidate.covered_cells intersect uncovered_mask
+            gain = number of occupied cells in gain_cells
+
+            total_wall_cells = number of occupied cells in wall_grid_data.coverage_mask
+            gain_ratio = gain / max(total_wall_cells, 1)
+
+            IF gain_ratio > best_gain:
+                best_candidate = candidate
+                best_gain = gain_ratio
+
+        IF best_candidate is NONE:
+            BREAK
+
+        IF best_gain < params.min_new_coverage_ratio:
+            BREAK
+
+        append best_candidate to selected
+
+        # mark newly covered cells as covered
+        FOR each cell in best_candidate.covered_cells:
+            uncovered_mask[cell] = 0
+
+        # optional:
+        # remove or downweight candidates with zero remaining gain
+
+        IF no occupied cells remain in uncovered_mask:
+            BREAK
+
+    RETURN {
+        selected_patches: selected,
+        uncovered_mask: uncovered_mask
+    }
+
+--------------------------------------------------
+FUNCTION CONVERT_PATCHES_TO_6D_POSES(
+    selected_patches_result,
+    wall_model,
+    distance_to_wall
+):
+
+    poses = []
+
+    FOR each patch in selected_patches_result.selected_patches:
+
+        u = patch.center_u
+        v = patch.center_v
+
+        # point on wall plane corresponding to optical-axis reference point
+        wall_point = wall_model.centroid + u * wall_model.U + v * wall_model.V
+
+        # place camera at desired offset
+        position = wall_point + wall_model.N * distance_to_wall
+
+        # camera faces the wall
+        #
+        # Depending on your camera optical frame convention,
+        # adapt the axis assignment below.
+        #
+        # Example convention:
+        # camera forward axis points toward the wall = -N
+        #
+        forward = -wall_model.N
+        right   = wall_model.U
+        up      = wall_model.V
+
+        orientation = QUATERNION_FROM_BASIS(right, up, forward)
+
+        append Pose(position, orientation) to poses
+
+    RETURN poses
+
+--------------------------------------------------
+FUNCTION BUILD_DEBUG_OUTPUT(
+    selected_patches_result,
+    wall_grid_data,
+    wall_model,
+    sensor_model
+):
+
+    # Publish enough information to verify with RGB and RViz.
+    #
+    # Recommended debug outputs:
+    # 1. wall local frame
+    # 2. colored pointcloud by selected ROI patch
+    # 3. ROI polygons on wall
+    # 4. hard-boundary polygons
+    # 5. uncovered wall mask
+    # 6. TF frame per pose
+
+    debug = {}
+
+    debug.wall_frame = {
+        centroid: wall_model.centroid,
+        U: wall_model.U,
+        V: wall_model.V,
+        N: wall_model.N
+    }
+
+    debug.wall_mask = wall_grid_data.coverage_mask
+    debug.outer_envelope = wall_grid_data.outer_envelope
+    debug.uncovered_mask = selected_patches_result.uncovered_mask
+
+    debug.accepted_patch_polygons = []
+    debug.accepted_roi_polygons = []
+
+    FOR each patch in selected_patches_result.selected_patches:
+        append patch.hard_polygon to debug.accepted_patch_polygons
+        append patch.roi_polygon  to debug.accepted_roi_polygons
+
+    RETURN debug
+
+--------------------------------------------------
+HELPER FUNCTION BUILD_RECTANGLE_POLYGON(
+    center_u,
+    center_v,
+    width,
+    height,
+    offset_u,
+    offset_v
+):
+
+    cu = center_u + offset_u
+    cv = center_v + offset_v
+
+    half_w = width / 2
+    half_h = height / 2
+
+    RETURN polygon with corners:
+        (cu - half_w, cv - half_h)
+        (cu + half_w, cv - half_h)
+        (cu + half_w, cv + half_h)
+        (cu - half_w, cv + half_h)
+
+--------------------------------------------------
+NOTES FOR THE IMPLEMENTING AGENT
+
+1. HARD VS SOFT CONSTRAINTS
+    - Hard boundary check uses OUTER wall envelope only.
+    - Internal holes/windows are NOT eroded against.
+    - Windows only reduce the ROI valid coverage ratio.
+
+2. WHY THIS MATCHES THE REQUIREMENT
+    - The patch center never causes the camera/EE footprint to exceed wall limits.
+    - Patches near windows are still allowed if they cover enough real wall.
+    - This avoids leaving too many points to scan manually.
+
+3. MULTIPLE WALLS
+    - Run the same planning pipeline independently for each target wall_id.
+
+4. DEBUGGING
+    - For each selected patch, color only the wall points whose projected (u,v)
+      lie inside that patch ROI polygon.
+    - Publish TF for each pose:
+        patch_<wall_id>_<index>
+    - Overlay these with RGB to verify that the ROI sees the intended patch.
+
+5. PARAMETER TUNING
+    - min_valid_roi_ratio:
+        lower -> fewer missed border regions near windows
+        higher -> cleaner but more conservative
+    - overlap_ratio:
+        higher -> more redundancy, more poses
+        lower -> fewer poses, more risk of missed coverage
+
+6. OPTIONAL IMPROVEMENTS
+    - use boustrophedon ordering for the final pose sequence
+    - add robot reachability filtering afterward
+    - use exact polygon coverage instead of raster approximation
+    - adapt candidate density near irregular boundaries
+
+END

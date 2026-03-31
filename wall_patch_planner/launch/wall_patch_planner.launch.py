@@ -8,13 +8,19 @@ import os
 
 
 def generate_launch_description():
-    config = os.path.join(
+    planner_config = os.path.join(
         get_package_share_directory('wall_patch_planner'),
         'config',
         'wall_patch_planner.yaml'
     )
+    filter_config = os.path.join(
+        get_package_share_directory('wall_patch_planner'),
+        'config',
+        'wall_patch_filter_demo.yaml'
+    )
 
     use_mock_camera_info = LaunchConfiguration('use_mock_camera_info')
+    use_filter_demo = LaunchConfiguration('use_filter_demo')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -22,12 +28,17 @@ def generate_launch_description():
             default_value='false',
             description='Start a mock CameraInfo publisher on /camera/camera_info',
         ),
+        DeclareLaunchArgument(
+            'use_filter_demo',
+            default_value='false',
+            description='Start the wall pose multi-window filter demo node',
+        ),
         Node(
             package='wall_patch_planner',
             executable='wall_patch_planner_node',
             name='wall_patch_planner',
             output='screen',
-            parameters=[config],
+            parameters=[planner_config],
         ),
         Node(
             package='wall_patch_planner',
@@ -46,5 +57,13 @@ def generate_launch_description():
                 'cy': 240.0,
                 'rate_hz': 30.0,
             }],
+        ),
+        Node(
+            package='wall_patch_planner',
+            executable='wall_patch_filter_demo_node',
+            name='wall_patch_filter_demo',
+            output='screen',
+            condition=IfCondition(use_filter_demo),
+            parameters=[filter_config],
         ),
     ])

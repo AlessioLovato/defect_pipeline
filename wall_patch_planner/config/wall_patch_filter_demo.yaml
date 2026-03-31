@@ -1,0 +1,11 @@
+wall_patch_filter_demo:
+  ros__parameters:
+    planner_node_name: /wall_patch_planner
+    planner_service_name: /wall_patch_planner/plan_patches
+    planner_pose_topic: /wall_patch_planner/poses
+    planner_marker_topic: /wall_patch_planner/debug_markers
+    filtered_pose_topic: /wall_patch_planner/filter_demo/poses
+    filtered_marker_topic: /wall_patch_planner/filter_demo/markers
+    request_timeout_ms: 5000
+    planner_wait_timeout_ms: 5000
+    topic_wait_timeout_ms: 5000

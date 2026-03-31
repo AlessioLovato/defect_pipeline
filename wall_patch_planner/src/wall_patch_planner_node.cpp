@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,10 @@ struct CameraFootprint
   double roi_height{0.0};
   double roi_center_x{0.0};
   double roi_center_y{0.0};
+  double ee_width{0.0};
+  double ee_height{0.0};
+  double hard_width{0.0};
+  double hard_height{0.0};
 };
 
 struct PatchPose
@@ -68,6 +73,46 @@ struct PatchPose
   double roi_v_max{0.0};
 };
 
+struct RectangleUV
+{
+  double center_u{0.0};
+  double center_v{0.0};
+  double width{0.0};
+  double height{0.0};
+  double offset_u{0.0};
+  double offset_v{0.0};
+};
+
+struct CandidatePatch
+{
+  int wall_id{0};
+  double center_u{0.0};
+  double center_v{0.0};
+  RectangleUV hard_polygon;
+  RectangleUV roi_polygon;
+  std::vector<int> covered_cells;
+  double coverage_ratio{0.0};
+};
+
+struct SelectedPatchResult
+{
+  std::vector<CandidatePatch> selected_patches;
+  std::vector<uint8_t> uncovered_mask;
+};
+
+struct WallGridData
+{
+  double min_u{0.0};
+  double max_u{0.0};
+  double min_v{0.0};
+  double max_v{0.0};
+  double grid_resolution{0.01};
+  int size_u{0};
+  int size_v{0};
+  std::vector<uint8_t> coverage_mask;
+  std::vector<uint8_t> outer_envelope;
+};
+
 struct WallModel
 {
   int wall_id{0};
@@ -80,6 +125,7 @@ struct WallModel
   double min_v{0.0};
   double max_v{0.0};
   std::vector<PointXYZL> points;
+  std::vector<Eigen::Vector2d> uv_points;
 };
 
 struct LabelLayout
@@ -195,7 +241,9 @@ CameraFootprint compute_camera_footprint(
   double roi_u_min,
   double roi_u_max,
   double roi_v_min,
-  double roi_v_max)
+  double roi_v_max,
+  double ee_size_x,
+  double ee_size_y)
 {
   const double fx = info.k[0];
   const double fy = info.k[4];
@@ -228,6 +276,10 @@ CameraFootprint compute_camera_footprint(
   fp.roi_height = fp.roi_y_max - fp.roi_y_min;
   fp.roi_center_x = 0.5 * (fp.roi_x_min + fp.roi_x_max);
   fp.roi_center_y = 0.5 * (fp.roi_y_min + fp.roi_y_max);
+  fp.ee_width = ee_size_x;
+  fp.ee_height = ee_size_y;
+  fp.hard_width = std::max(fp.roi_width, ee_size_x);
+  fp.hard_height = std::max(fp.roi_height, ee_size_y);
   return fp;
 }
 
@@ -268,6 +320,176 @@ std::array<std::uint8_t, 3> color_for_index(std::size_t index)
   return {{c[0], c[1], c[2]}};
 }
 
+int grid_index(int u_idx, int v_idx, int size_u)
+{
+  return v_idx * size_u + u_idx;
+}
+
+bool is_valid_cell(int u_idx, int v_idx, int size_u, int size_v)
+{
+  return u_idx >= 0 && u_idx < size_u && v_idx >= 0 && v_idx < size_v;
+}
+
+std::vector<uint8_t> dilate_mask(
+  const std::vector<uint8_t> & mask, int size_u, int size_v, int radius_u, int radius_v)
+{
+  std::vector<uint8_t> out(mask.size(), 0U);
+  for (int v = 0; v < size_v; ++v) {
+    for (int u = 0; u < size_u; ++u) {
+      bool occupied = false;
+      for (int dv = -radius_v; dv <= radius_v && !occupied; ++dv) {
+        for (int du = -radius_u; du <= radius_u; ++du) {
+          const int nu = u + du;
+          const int nv = v + dv;
+          if (!is_valid_cell(nu, nv, size_u, size_v)) {
+            continue;
+          }
+          if (mask[grid_index(nu, nv, size_u)] != 0U) {
+            occupied = true;
+            break;
+          }
+        }
+      }
+      out[grid_index(u, v, size_u)] = occupied ? 1U : 0U;
+    }
+  }
+  return out;
+}
+
+std::vector<uint8_t> erode_mask(
+  const std::vector<uint8_t> & mask, int size_u, int size_v, int radius_u, int radius_v)
+{
+  std::vector<uint8_t> out(mask.size(), 0U);
+  for (int v = 0; v < size_v; ++v) {
+    for (int u = 0; u < size_u; ++u) {
+      bool occupied = true;
+      for (int dv = -radius_v; dv <= radius_v && occupied; ++dv) {
+        for (int du = -radius_u; du <= radius_u; ++du) {
+          const int nu = u + du;
+          const int nv = v + dv;
+          if (!is_valid_cell(nu, nv, size_u, size_v) || mask[grid_index(nu, nv, size_u)] == 0U) {
+            occupied = false;
+            break;
+          }
+        }
+      }
+      out[grid_index(u, v, size_u)] = occupied ? 1U : 0U;
+    }
+  }
+  return out;
+}
+
+std::vector<uint8_t> close_mask(
+  const std::vector<uint8_t> & mask, int size_u, int size_v, int radius_u, int radius_v)
+{
+  return erode_mask(dilate_mask(mask, size_u, size_v, radius_u, radius_v), size_u, size_v, radius_u, radius_v);
+}
+
+std::vector<uint8_t> largest_connected_component(
+  const std::vector<uint8_t> & mask, int size_u, int size_v)
+{
+  std::vector<uint8_t> visited(mask.size(), 0U);
+  std::vector<int> best_component;
+
+  for (int v = 0; v < size_v; ++v) {
+    for (int u = 0; u < size_u; ++u) {
+      const int start_idx = grid_index(u, v, size_u);
+      if (mask[start_idx] == 0U || visited[start_idx] != 0U) {
+        continue;
+      }
+
+      std::vector<int> component;
+      std::vector<int> stack{start_idx};
+      visited[start_idx] = 1U;
+      while (!stack.empty()) {
+        const int idx = stack.back();
+        stack.pop_back();
+        component.push_back(idx);
+
+        const int cu = idx % size_u;
+        const int cv = idx / size_u;
+        constexpr std::array<std::array<int, 2>, 4> kNeighbors{{{{1, 0}}, {{-1, 0}}, {{0, 1}}, {{0, -1}}}};
+        for (const auto & delta : kNeighbors) {
+          const int nu = cu + delta[0];
+          const int nv = cv + delta[1];
+          if (!is_valid_cell(nu, nv, size_u, size_v)) {
+            continue;
+          }
+          const int n_idx = grid_index(nu, nv, size_u);
+          if (mask[n_idx] == 0U || visited[n_idx] != 0U) {
+            continue;
+          }
+          visited[n_idx] = 1U;
+          stack.push_back(n_idx);
+        }
+      }
+
+      if (component.size() > best_component.size()) {
+        best_component = std::move(component);
+      }
+    }
+  }
+
+  std::vector<uint8_t> out(mask.size(), 0U);
+  for (const int idx : best_component) {
+    out[idx] = 1U;
+  }
+  return out;
+}
+
+std::vector<uint8_t> fill_internal_holes(
+  const std::vector<uint8_t> & mask, int size_u, int size_v)
+{
+  std::vector<uint8_t> visited(mask.size(), 0U);
+  std::vector<int> stack;
+
+  auto push_if_empty = [&](int u, int v) {
+    if (!is_valid_cell(u, v, size_u, size_v)) {
+      return;
+    }
+    const int idx = grid_index(u, v, size_u);
+    if (mask[idx] != 0U || visited[idx] != 0U) {
+      return;
+    }
+    visited[idx] = 1U;
+    stack.push_back(idx);
+  };
+
+  for (int u = 0; u < size_u; ++u) {
+    push_if_empty(u, 0);
+    push_if_empty(u, size_v - 1);
+  }
+  for (int v = 0; v < size_v; ++v) {
+    push_if_empty(0, v);
+    push_if_empty(size_u - 1, v);
+  }
+
+  while (!stack.empty()) {
+    const int idx = stack.back();
+    stack.pop_back();
+    const int cu = idx % size_u;
+    const int cv = idx / size_u;
+    constexpr std::array<std::array<int, 2>, 4> kNeighbors{{{{1, 0}}, {{-1, 0}}, {{0, 1}}, {{0, -1}}}};
+    for (const auto & delta : kNeighbors) {
+      push_if_empty(cu + delta[0], cv + delta[1]);
+    }
+  }
+
+  std::vector<uint8_t> out = mask;
+  for (std::size_t idx = 0; idx < out.size(); ++idx) {
+    if (out[idx] == 0U && visited[idx] == 0U) {
+      out[idx] = 1U;
+    }
+  }
+  return out;
+}
+
+std::size_t count_occupied_cells(const std::vector<uint8_t> & mask)
+{
+  return static_cast<std::size_t>(
+    std::count(mask.begin(), mask.end(), static_cast<uint8_t>(1U)));
+}
+
 }  // namespace
 
 class WallPatchPlannerNode : public rclcpp::Node
@@ -287,21 +509,18 @@ public:
     declare_parameter<int>("selected_room_id", 0);
     declare_parameter<std::vector<int64_t>>("selected_wall_ids", {0});
     declare_parameter<int>("plane_label_stride", 1000);
-    declare_parameter<double>("distance_to_wall", 0.35);
+    declare_parameter<double>("fov_distance", 0.35);
+    declare_parameter<double>("wall_distance", 0.0);
     declare_parameter<double>("overlap", 0.15);
+    declare_parameter<double>("ee_size_x", 0.30);
+    declare_parameter<double>("ee_size_y", 0.30);
+    declare_parameter<double>("grid_resolution", 0.02);
+    declare_parameter<double>("min_valid_roi_ratio", 0.65);
+    declare_parameter<double>("min_new_coverage_ratio", 0.05);
     declare_parameter<double>("roi_width_px", -1.0);
     declare_parameter<double>("roi_height_px", -1.0);
     declare_parameter<double>("roi_center_u_offset_px", 0.0);
     declare_parameter<double>("roi_center_v_offset_px", 0.0);
-    declare_parameter<double>("roi_width_ratio", 0.6);
-    declare_parameter<double>("roi_height_ratio", 0.6);
-    declare_parameter<double>("roi_center_u_offset", 0.0);
-    declare_parameter<double>("roi_center_v_offset", 0.0);
-    // Keep legacy bounds parameters for compatibility with older configs.
-    declare_parameter<double>("roi_u_min", 0.2);
-    declare_parameter<double>("roi_u_max", 0.8);
-    declare_parameter<double>("roi_v_min", 0.2);
-    declare_parameter<double>("roi_v_max", 0.8);
     declare_parameter<int>("max_tf_frames", 512);
 
     load_parameters();
@@ -343,22 +562,19 @@ private:
     camera_frame_prefix_ = get_parameter("camera_frame_prefix").as_string();
     selected_room_id_ = get_parameter("selected_room_id").as_int();
     plane_label_stride_ = get_parameter("plane_label_stride").as_int();
-    distance_to_wall_ = get_parameter("distance_to_wall").as_double();
+    fov_distance_ = get_parameter("fov_distance").as_double();
+    wall_distance_ = get_parameter("wall_distance").as_double();
+    ee_size_x_ = get_parameter("ee_size_x").as_double();
+    ee_size_y_ = get_parameter("ee_size_y").as_double();
+    grid_resolution_ = get_parameter("grid_resolution").as_double();
+    min_valid_roi_ratio_ = get_parameter("min_valid_roi_ratio").as_double();
+    min_new_coverage_ratio_ = get_parameter("min_new_coverage_ratio").as_double();
     roi_width_px_ = get_parameter("roi_width_px").as_double();
     roi_height_px_ = get_parameter("roi_height_px").as_double();
     roi_center_u_offset_px_ = get_parameter("roi_center_u_offset_px").as_double();
     roi_center_v_offset_px_ = get_parameter("roi_center_v_offset_px").as_double();
-    roi_width_ratio_ = get_parameter("roi_width_ratio").as_double();
-    roi_height_ratio_ = get_parameter("roi_height_ratio").as_double();
-    roi_center_u_offset_ = get_parameter("roi_center_u_offset").as_double();
-    roi_center_v_offset_ = get_parameter("roi_center_v_offset").as_double();
-    legacy_roi_u_min_ = get_parameter("roi_u_min").as_double();
-    legacy_roi_u_max_ = get_parameter("roi_u_max").as_double();
-    legacy_roi_v_min_ = get_parameter("roi_v_min").as_double();
-    legacy_roi_v_max_ = get_parameter("roi_v_max").as_double();
     overlap_ = get_parameter("overlap").as_double();
     max_tf_frames_ = get_parameter("max_tf_frames").as_int();
-    update_roi_bounds();
 
     selected_wall_ids_.clear();
     // Materialize the parameter array before iterating to avoid binding a
@@ -380,8 +596,20 @@ private:
         for (const auto value : param.as_integer_array()) {
           selected_wall_ids_.push_back(static_cast<int>(value));
         }
-      } else if (param.get_name() == "distance_to_wall") {
-        distance_to_wall_ = param.as_double();
+      } else if (param.get_name() == "fov_distance") {
+        fov_distance_ = param.as_double();
+      } else if (param.get_name() == "wall_distance") {
+        wall_distance_ = param.as_double();
+      } else if (param.get_name() == "ee_size_x") {
+        ee_size_x_ = param.as_double();
+      } else if (param.get_name() == "ee_size_y") {
+        ee_size_y_ = param.as_double();
+      } else if (param.get_name() == "grid_resolution") {
+        grid_resolution_ = param.as_double();
+      } else if (param.get_name() == "min_valid_roi_ratio") {
+        min_valid_roi_ratio_ = param.as_double();
+      } else if (param.get_name() == "min_new_coverage_ratio") {
+        min_new_coverage_ratio_ = param.as_double();
       } else if (param.get_name() == "roi_width_px") {
         roi_width_px_ = param.as_double();
       } else if (param.get_name() == "roi_height_px") {
@@ -390,73 +618,20 @@ private:
         roi_center_u_offset_px_ = param.as_double();
       } else if (param.get_name() == "roi_center_v_offset_px") {
         roi_center_v_offset_px_ = param.as_double();
-      } else if (param.get_name() == "roi_width_ratio") {
-        roi_width_ratio_ = param.as_double();
-      } else if (param.get_name() == "roi_height_ratio") {
-        roi_height_ratio_ = param.as_double();
-      } else if (param.get_name() == "roi_center_u_offset") {
-        roi_center_u_offset_ = param.as_double();
-      } else if (param.get_name() == "roi_center_v_offset") {
-        roi_center_v_offset_ = param.as_double();
       } else if (param.get_name() == "overlap") {
         overlap_ = param.as_double();
-      } else if (param.get_name() == "roi_u_min") {
-        legacy_roi_u_min_ = param.as_double();
-      } else if (param.get_name() == "roi_u_max") {
-        legacy_roi_u_max_ = param.as_double();
-      } else if (param.get_name() == "roi_v_min") {
-        legacy_roi_v_min_ = param.as_double();
-      } else if (param.get_name() == "roi_v_max") {
-        legacy_roi_v_max_ = param.as_double();
       } else if (param.get_name() == "plane_label_stride") {
         plane_label_stride_ = param.as_int();
       }
     }
-
-    update_roi_bounds();
 
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = validate_configuration(result.reason);
     return result;
   }
 
-  bool using_pixel_roi() const
-  {
-    return roi_width_px_ > 0.0 || roi_height_px_ > 0.0;
-  }
-
-  void update_roi_bounds()
-  {
-    const bool using_legacy_bounds =
-      std::abs(legacy_roi_u_min_ - 0.2) > 1e-9 ||
-      std::abs(legacy_roi_u_max_ - 0.8) > 1e-9 ||
-      std::abs(legacy_roi_v_min_ - 0.2) > 1e-9 ||
-      std::abs(legacy_roi_v_max_ - 0.8) > 1e-9;
-
-    if (using_legacy_bounds) {
-      roi_u_min_ = legacy_roi_u_min_;
-      roi_u_max_ = legacy_roi_u_max_;
-      roi_v_min_ = legacy_roi_v_min_;
-      roi_v_max_ = legacy_roi_v_max_;
-      roi_width_ratio_ = roi_u_max_ - roi_u_min_;
-      roi_height_ratio_ = roi_v_max_ - roi_v_min_;
-      roi_center_u_offset_ = 0.5 * (roi_u_min_ + roi_u_max_) - 0.5;
-      roi_center_v_offset_ = 0.5 * (roi_v_min_ + roi_v_max_) - 0.5;
-      return;
-    }
-
-    roi_u_min_ = 0.5 + roi_center_u_offset_ - 0.5 * roi_width_ratio_;
-    roi_u_max_ = 0.5 + roi_center_u_offset_ + 0.5 * roi_width_ratio_;
-    roi_v_min_ = 0.5 + roi_center_v_offset_ - 0.5 * roi_height_ratio_;
-    roi_v_max_ = 0.5 + roi_center_v_offset_ + 0.5 * roi_height_ratio_;
-  }
-
   std::array<double, 4> resolve_roi_bounds(const sensor_msgs::msg::CameraInfo & info) const
   {
-    if (!using_pixel_roi()) {
-      return {roi_u_min_, roi_u_max_, roi_v_min_, roi_v_max_};
-    }
-
     const double image_width = static_cast<double>(info.width);
     const double image_height = static_cast<double>(info.height);
     if (image_width <= 0.0 || image_height <= 0.0) {
@@ -494,36 +669,37 @@ private:
       reason = "plane_label_stride must be > 0";
       return false;
     }
-    if (distance_to_wall_ <= 0.0) {
-      reason = "distance_to_wall must be > 0";
+    if (fov_distance_ <= 0.0) {
+      reason = "fov_distance must be > 0";
+      return false;
+    }
+    if (wall_distance_ < 0.0) {
+      reason = "wall_distance must be >= 0";
+      return false;
+    }
+    if (ee_size_x_ <= 0.0 || ee_size_y_ <= 0.0) {
+      reason = "ee_size_x and ee_size_y must be > 0";
+      return false;
+    }
+    if (grid_resolution_ <= 0.0) {
+      reason = "grid_resolution must be > 0";
+      return false;
+    }
+    if (!(0.0 < min_valid_roi_ratio_ && min_valid_roi_ratio_ <= 1.0)) {
+      reason = "min_valid_roi_ratio must be in (0,1]";
+      return false;
+    }
+    if (!(0.0 < min_new_coverage_ratio_ && min_new_coverage_ratio_ <= 1.0)) {
+      reason = "min_new_coverage_ratio must be in (0,1]";
       return false;
     }
     if (overlap_ < 0.0 || overlap_ >= 1.0) {
       reason = "overlap must be in [0,1)";
       return false;
     }
-    if (using_pixel_roi()) {
-      if (!(roi_width_px_ > 0.0 && roi_height_px_ > 0.0)) {
-        reason = "roi_width_px and roi_height_px must both be > 0 when using pixel ROI";
-        return false;
-      }
-    } else {
-      if (!(0.0 < roi_width_ratio_ && roi_width_ratio_ <= 1.0)) {
-        reason = "roi_width_ratio must be in (0,1]";
-        return false;
-      }
-      if (!(0.0 < roi_height_ratio_ && roi_height_ratio_ <= 1.0)) {
-        reason = "roi_height_ratio must be in (0,1]";
-        return false;
-      }
-      if (!(0.0 <= roi_u_min_ && roi_u_min_ < roi_u_max_ && roi_u_max_ <= 1.0)) {
-        reason = "roi_u_min/max must satisfy 0 <= min < max <= 1";
-        return false;
-      }
-      if (!(0.0 <= roi_v_min_ && roi_v_min_ < roi_v_max_ && roi_v_max_ <= 1.0)) {
-        reason = "roi_v_min/max must satisfy 0 <= min < max <= 1";
-        return false;
-      }
+    if (!(roi_width_px_ > 0.0 && roi_height_px_ > 0.0)) {
+      reason = "roi_width_px and roi_height_px must both be > 0";
+      return false;
     }
     if (selected_wall_ids_.empty()) {
       reason = "selected_wall_ids cannot be empty";
@@ -596,8 +772,13 @@ private:
 
       const auto roi_bounds = resolve_roi_bounds(*latest_camera_info_);
       const CameraFootprint footprint = compute_camera_footprint(
-        *latest_camera_info_, distance_to_wall_,
-        roi_bounds[0], roi_bounds[1], roi_bounds[2], roi_bounds[3]);
+        *latest_camera_info_, fov_distance_,
+        roi_bounds[0], roi_bounds[1], roi_bounds[2], roi_bounds[3], ee_size_x_, ee_size_y_);
+      RCLCPP_INFO(
+        get_logger(),
+        "Planning request: room=%d walls=%zu roi_bounds=[%.3f, %.3f, %.3f, %.3f] fov_distance=%.3f wall_distance=%.3f roi_size=(%.3f, %.3f)m hard_size=(%.3f, %.3f)m",
+        selected_room_id_, selected_wall_ids_.size(), roi_bounds[0], roi_bounds[1], roi_bounds[2], roi_bounds[3],
+        fov_distance_, wall_distance_, footprint.roi_width, footprint.roi_height, footprint.hard_width, footprint.hard_height);
 
       geometry_msgs::msg::PoseArray pose_array;
       pose_array.header.stamp = now();
@@ -608,7 +789,33 @@ private:
       int marker_id = 0;
 
       for (const auto & wall : walls) {
-        const auto wall_patches = generate_patches_for_wall(wall, footprint);
+        RCLCPP_INFO(
+          get_logger(),
+          "Wall %d: input_points=%zu extents_u=[%.3f, %.3f] extents_v=[%.3f, %.3f]",
+          wall.wall_id, wall.points.size(), wall.min_u, wall.max_u, wall.min_v, wall.max_v);
+        const auto wall_grid = build_wall_2d_representation(wall);
+        RCLCPP_INFO(
+          get_logger(),
+          "Wall %d: grid=%dx%d res=%.3f occupied=%zu envelope=%zu",
+          wall.wall_id, wall_grid.size_u, wall_grid.size_v, wall_grid.grid_resolution,
+          count_occupied_cells(wall_grid.coverage_mask), count_occupied_cells(wall_grid.outer_envelope));
+        const auto candidates = generate_valid_candidate_centers(wall, wall_grid, footprint);
+        RCLCPP_INFO(
+          get_logger(),
+          "Wall %d: valid_candidates=%zu",
+          wall.wall_id, candidates.size());
+        const auto selected_result = select_patches_for_coverage(candidates, wall_grid);
+        RCLCPP_INFO(
+          get_logger(),
+          "Wall %d: selected_patches=%zu remaining_uncovered=%zu",
+          wall.wall_id, selected_result.selected_patches.size(), count_occupied_cells(selected_result.uncovered_mask));
+        const auto wall_patches = convert_selected_patches_to_poses(selected_result, wall);
+        if (wall_patches.empty()) {
+          RCLCPP_WARN(
+            get_logger(),
+            "Wall %d produced no poses. Check valid_candidates, min_valid_roi_ratio=%.3f, min_new_coverage_ratio=%.3f, grid_resolution=%.3f",
+            wall.wall_id, min_valid_roi_ratio_, min_new_coverage_ratio_, grid_resolution_);
+        }
         for (const auto & patch : wall_patches) {
           pose_array.poses.push_back(patch.pose);
           all_patches.push_back(patch);
@@ -728,10 +935,12 @@ private:
     wall.max_u = -std::numeric_limits<double>::infinity();
     wall.min_v = std::numeric_limits<double>::infinity();
     wall.max_v = -std::numeric_limits<double>::infinity();
+    wall.uv_points.reserve(points.size());
     for (const auto & p : points) {
       const Eigen::Vector3d d = Eigen::Vector3d(p.x, p.y, p.z) - centroid;
       const double u = d.dot(axis_u);
       const double v = d.dot(axis_v);
+      wall.uv_points.emplace_back(u, v);
       wall.min_u = std::min(wall.min_u, u);
       wall.max_u = std::max(wall.max_u, u);
       wall.min_v = std::min(wall.min_v, v);
@@ -740,80 +949,321 @@ private:
     return wall;
   }
 
-  std::vector<PatchPose> generate_patches_for_wall(const WallModel & wall, const CameraFootprint & fp) const
+  WallGridData build_wall_2d_representation(const WallModel & wall) const
   {
-    std::vector<PatchPose> patches;
-    const double step_u = std::max(fp.roi_width * (1.0 - overlap_), 0.01);
-    const double step_v = std::max(fp.roi_height * (1.0 - overlap_), 0.01);
+    WallGridData grid;
+    grid.grid_resolution = grid_resolution_;
+    const double margin = 2.0 * grid_resolution_;
+    grid.min_u = wall.min_u - margin;
+    grid.max_u = wall.max_u + margin;
+    grid.min_v = wall.min_v - margin;
+    grid.max_v = wall.max_v + margin;
+    grid.size_u = std::max(1, static_cast<int>(std::ceil((grid.max_u - grid.min_u) / grid.grid_resolution)) + 1);
+    grid.size_v = std::max(1, static_cast<int>(std::ceil((grid.max_v - grid.min_v) / grid.grid_resolution)) + 1);
+    grid.coverage_mask.assign(static_cast<std::size_t>(grid.size_u * grid.size_v), 0U);
 
-    const double axis_u_min = wall.min_u - fp.full_x_min;
-    const double axis_u_max = wall.max_u - fp.full_x_max;
-    const double axis_v_min = wall.min_v - fp.full_y_min;
-    const double axis_v_max = wall.max_v - fp.full_y_max;
-
-    if (axis_u_min > axis_u_max || axis_v_min > axis_v_max) {
-      return patches;
+    for (const auto & uv : wall.uv_points) {
+      const int cell_u = static_cast<int>(std::floor((uv.x() - grid.min_u) / grid.grid_resolution));
+      const int cell_v = static_cast<int>(std::floor((uv.y() - grid.min_v) / grid.grid_resolution));
+      if (!is_valid_cell(cell_u, cell_v, grid.size_u, grid.size_v)) {
+        continue;
+      }
+      grid.coverage_mask[grid_index(cell_u, cell_v, grid.size_u)] = 1U;
     }
 
-    auto generate_positions = [](double patch_min, double patch_max, double width, double step) {
-      std::vector<double> positions;
-      if ((patch_max - patch_min) <= width + 1e-6) {
-        positions.push_back(0.5 * (patch_min + patch_max));
-        return positions;
-      }
-      const double start = patch_min + 0.5 * width;
-      const double end = patch_max - 0.5 * width;
-      double current = start;
-      positions.push_back(current);
-      while (current + step < end - 1e-6) {
-        current += step;
-        positions.push_back(current);
-      }
-      if (positions.back() < end - 1e-6) {
-        positions.push_back(end);
-      }
-      return positions;
-    };
+    const auto closed_mask = close_mask(grid.coverage_mask, grid.size_u, grid.size_v, 1, 1);
+    const auto largest_component = largest_connected_component(closed_mask, grid.size_u, grid.size_v);
+    grid.coverage_mask = largest_component;
+    grid.outer_envelope = fill_internal_holes(largest_component, grid.size_u, grid.size_v);
+    return grid;
+  }
 
-    const auto roi_centers_u = generate_positions(wall.min_u, wall.max_u, fp.roi_width, step_u);
-    const auto roi_centers_v = generate_positions(wall.min_v, wall.max_v, fp.roi_height, step_v);
+  RectangleUV build_rectangle_polygon(
+    double center_u,
+    double center_v,
+    double width,
+    double height,
+    double offset_u,
+    double offset_v) const
+  {
+    RectangleUV rect;
+    rect.center_u = center_u;
+    rect.center_v = center_v;
+    rect.width = width;
+    rect.height = height;
+    rect.offset_u = offset_u;
+    rect.offset_v = offset_v;
+    return rect;
+  }
 
-    int patch_idx = 0;
-    for (const double roi_center_u : roi_centers_u) {
-      for (const double roi_center_v : roi_centers_v) {
-        const double axis_u = roi_center_u - fp.roi_center_x;
-        const double axis_v = roi_center_v - fp.roi_center_y;
-        if (axis_u < axis_u_min - 1e-6 || axis_u > axis_u_max + 1e-6 ||
-            axis_v < axis_v_min - 1e-6 || axis_v > axis_v_max + 1e-6)
+  std::vector<int> cells_inside_rectangle(
+    const WallGridData & grid,
+    const RectangleUV & rect) const
+  {
+    const double cu = rect.center_u + rect.offset_u;
+    const double cv = rect.center_v + rect.offset_v;
+    const double min_u = cu - 0.5 * rect.width;
+    const double max_u = cu + 0.5 * rect.width;
+    const double min_v = cv - 0.5 * rect.height;
+    const double max_v = cv + 0.5 * rect.height;
+
+    const int min_cell_u = std::max(0, static_cast<int>(std::floor((min_u - grid.min_u) / grid.grid_resolution)));
+    const int max_cell_u = std::min(
+      grid.size_u - 1, static_cast<int>(std::ceil((max_u - grid.min_u) / grid.grid_resolution)));
+    const int min_cell_v = std::max(0, static_cast<int>(std::floor((min_v - grid.min_v) / grid.grid_resolution)));
+    const int max_cell_v = std::min(
+      grid.size_v - 1, static_cast<int>(std::ceil((max_v - grid.min_v) / grid.grid_resolution)));
+
+    std::vector<int> cells;
+    for (int cell_v = min_cell_v; cell_v <= max_cell_v; ++cell_v) {
+      for (int cell_u = min_cell_u; cell_u <= max_cell_u; ++cell_u) {
+        const double center_cell_u = grid.min_u + (static_cast<double>(cell_u) + 0.5) * grid.grid_resolution;
+        const double center_cell_v = grid.min_v + (static_cast<double>(cell_v) + 0.5) * grid.grid_resolution;
+        if (center_cell_u < min_u - 1e-6 || center_cell_u > max_u + 1e-6 ||
+            center_cell_v < min_v - 1e-6 || center_cell_v > max_v + 1e-6)
         {
           continue;
         }
-
-        const Eigen::Vector3d optical_center =
-          wall.centroid + axis_u * wall.axis_u + axis_v * wall.axis_v + distance_to_wall_ * wall.normal;
-
-        const Eigen::Vector3d cam_z = -wall.normal.normalized();
-        const Eigen::Vector3d cam_x = wall.axis_u.normalized();
-        const Eigen::Vector3d cam_y = cam_z.cross(cam_x).normalized();
-
-        PatchPose patch;
-        patch.wall_id = wall.wall_id;
-        patch.patch_index = patch_idx++;
-        patch.axis_u = axis_u;
-        patch.axis_v = axis_v;
-        patch.roi_u_min = roi_center_u - 0.5 * fp.roi_width;
-        patch.roi_u_max = roi_center_u + 0.5 * fp.roi_width;
-        patch.roi_v_min = roi_center_v - 0.5 * fp.roi_height;
-        patch.roi_v_max = roi_center_v + 0.5 * fp.roi_height;
-        patch.pose.position.x = optical_center.x();
-        patch.pose.position.y = optical_center.y();
-        patch.pose.position.z = optical_center.z();
-        patch.pose.orientation = quaternion_from_basis(cam_x, cam_y, cam_z);
-        patches.push_back(patch);
+        cells.push_back(grid_index(cell_u, cell_v, grid.size_u));
       }
     }
+    return cells;
+  }
 
-    return patches;
+  bool rectangle_fully_inside_mask(
+    const RectangleUV & rect,
+    const WallGridData & grid,
+    const std::vector<uint8_t> & mask) const
+  {
+    const auto cells = cells_inside_rectangle(grid, rect);
+    if (cells.empty()) {
+      return false;
+    }
+    for (const int idx : cells) {
+      if (mask[static_cast<std::size_t>(idx)] == 0U) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::vector<CandidatePatch> generate_valid_candidate_centers(
+    const WallModel & wall,
+    const WallGridData & grid,
+    const CameraFootprint & fp) const
+  {
+    const int kernel_half_u = std::max(0, static_cast<int>(std::ceil((0.5 * fp.hard_width) / grid.grid_resolution)));
+    const int kernel_half_v = std::max(0, static_cast<int>(std::ceil((0.5 * fp.hard_height) / grid.grid_resolution)));
+    const auto valid_center_region = erode_mask(
+      grid.outer_envelope, grid.size_u, grid.size_v, kernel_half_u, kernel_half_v);
+    const auto valid_center_count = count_occupied_cells(valid_center_region);
+    if (valid_center_count == 0U) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Wall %d: valid center region is empty after erosion. hard_size=(%.3f, %.3f)m grid_res=%.3f envelope_cells=%zu",
+        wall.wall_id, fp.hard_width, fp.hard_height, grid.grid_resolution,
+        count_occupied_cells(grid.outer_envelope));
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "Wall %d: valid center cells after erosion=%zu",
+        wall.wall_id, valid_center_count);
+    }
+
+    const double step_u = std::max(fp.roi_width * (1.0 - overlap_), grid.grid_resolution);
+    const double step_v = std::max(fp.roi_height * (1.0 - overlap_), grid.grid_resolution);
+    const double max_shift_u =
+      0.5 * std::max(fp.hard_width - fp.roi_width, 0.0) + overlap_ * fp.roi_width;
+    const double max_shift_v =
+      0.5 * std::max(fp.hard_height - fp.roi_height, 0.0) + overlap_ * fp.roi_height;
+
+    std::vector<CandidatePatch> candidates;
+    std::size_t rejected_hard_boundary = 0U;
+    std::size_t rejected_empty_roi = 0U;
+    std::size_t rejected_low_coverage = 0U;
+    std::size_t rejected_no_feasible_center = 0U;
+    for (double roi_center_v = wall.min_v; roi_center_v <= wall.max_v + 1e-6; roi_center_v += step_v) {
+      for (double roi_center_u = wall.min_u; roi_center_u <= wall.max_u + 1e-6; roi_center_u += step_u) {
+        const double nominal_hard_center_u = roi_center_u - fp.roi_center_x;
+        const double nominal_hard_center_v = roi_center_v - fp.roi_center_y;
+
+        double chosen_hard_center_u = 0.0;
+        double chosen_hard_center_v = 0.0;
+        double best_distance_sq = std::numeric_limits<double>::infinity();
+
+        for (int cell_v = 0; cell_v < grid.size_v; ++cell_v) {
+          for (int cell_u = 0; cell_u < grid.size_u; ++cell_u) {
+            const int idx = grid_index(cell_u, cell_v, grid.size_u);
+            if (valid_center_region[static_cast<std::size_t>(idx)] == 0U) {
+              continue;
+            }
+
+            const double hard_center_u = grid.min_u + (static_cast<double>(cell_u) + 0.5) * grid.grid_resolution;
+            const double hard_center_v = grid.min_v + (static_cast<double>(cell_v) + 0.5) * grid.grid_resolution;
+            const double delta_u = std::abs(hard_center_u - nominal_hard_center_u);
+            const double delta_v = std::abs(hard_center_v - nominal_hard_center_v);
+            if (delta_u > max_shift_u + 1e-6 || delta_v > max_shift_v + 1e-6) {
+              continue;
+            }
+
+            const double distance_sq = delta_u * delta_u + delta_v * delta_v;
+            if (distance_sq < best_distance_sq) {
+              best_distance_sq = distance_sq;
+              chosen_hard_center_u = hard_center_u;
+              chosen_hard_center_v = hard_center_v;
+            }
+          }
+        }
+
+        if (!std::isfinite(best_distance_sq)) {
+          ++rejected_no_feasible_center;
+          continue;
+        }
+
+        CandidatePatch candidate;
+        candidate.wall_id = wall.wall_id;
+        candidate.center_u = chosen_hard_center_u;
+        candidate.center_v = chosen_hard_center_v;
+        candidate.hard_polygon = build_rectangle_polygon(
+          candidate.center_u, candidate.center_v, fp.hard_width, fp.hard_height, 0.0, 0.0);
+        candidate.roi_polygon = build_rectangle_polygon(
+          roi_center_u, roi_center_v, fp.roi_width, fp.roi_height, 0.0, 0.0);
+
+        if (!rectangle_fully_inside_mask(candidate.hard_polygon, grid, grid.outer_envelope)) {
+          ++rejected_hard_boundary;
+          continue;
+        }
+
+        const auto roi_cells = cells_inside_rectangle(grid, candidate.roi_polygon);
+        if (roi_cells.empty()) {
+          ++rejected_empty_roi;
+          continue;
+        }
+
+        int valid_count = 0;
+        for (const int roi_idx : roi_cells) {
+          if (grid.coverage_mask[static_cast<std::size_t>(roi_idx)] != 0U) {
+            candidate.covered_cells.push_back(roi_idx);
+            ++valid_count;
+          }
+        }
+        candidate.coverage_ratio = static_cast<double>(valid_count) / static_cast<double>(roi_cells.size());
+        if (candidate.coverage_ratio < min_valid_roi_ratio_) {
+          ++rejected_low_coverage;
+          continue;
+        }
+        candidates.push_back(std::move(candidate));
+      }
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "Wall %d: candidate rejection stats no_feasible_center=%zu hard_boundary=%zu empty_roi=%zu low_coverage=%zu accepted=%zu",
+      wall.wall_id, rejected_no_feasible_center, rejected_hard_boundary, rejected_empty_roi, rejected_low_coverage,
+      candidates.size());
+    return candidates;
+  }
+
+  SelectedPatchResult select_patches_for_coverage(
+    const std::vector<CandidatePatch> & candidates,
+    const WallGridData & grid) const
+  {
+    SelectedPatchResult result;
+    result.uncovered_mask = grid.coverage_mask;
+    const double total_wall_cells = static_cast<double>(
+      std::count(grid.coverage_mask.begin(), grid.coverage_mask.end(), static_cast<uint8_t>(1U)));
+
+    if (total_wall_cells <= 0.0) {
+      return result;
+    }
+
+    std::vector<uint8_t> candidate_disabled(candidates.size(), 0U);
+    while (true) {
+      int best_index = -1;
+      double best_gain_ratio = 0.0;
+
+      for (std::size_t idx = 0; idx < candidates.size(); ++idx) {
+        if (candidate_disabled[idx] != 0U) {
+          continue;
+        }
+
+        int gain = 0;
+        for (const int cell_idx : candidates[idx].covered_cells) {
+          if (result.uncovered_mask[static_cast<std::size_t>(cell_idx)] != 0U) {
+            ++gain;
+          }
+        }
+        const double gain_ratio = static_cast<double>(gain) / total_wall_cells;
+        if (gain_ratio > best_gain_ratio) {
+          best_gain_ratio = gain_ratio;
+          best_index = static_cast<int>(idx);
+        }
+      }
+
+      if (best_index < 0 || best_gain_ratio < min_new_coverage_ratio_) {
+        if (best_index < 0) {
+          RCLCPP_INFO(get_logger(), "Coverage selection stopped: no remaining candidate adds new coverage");
+        } else {
+          RCLCPP_INFO(
+            get_logger(),
+            "Coverage selection stopped: best_gain_ratio=%.4f below threshold=%.4f",
+            best_gain_ratio, min_new_coverage_ratio_);
+        }
+        break;
+      }
+
+      result.selected_patches.push_back(candidates[static_cast<std::size_t>(best_index)]);
+      candidate_disabled[static_cast<std::size_t>(best_index)] = 1U;
+      for (const int cell_idx : candidates[static_cast<std::size_t>(best_index)].covered_cells) {
+        result.uncovered_mask[static_cast<std::size_t>(cell_idx)] = 0U;
+      }
+
+      if (std::none_of(
+            result.uncovered_mask.begin(), result.uncovered_mask.end(),
+            [](uint8_t value) {return value != 0U;}))
+      {
+        break;
+      }
+    }
+    return result;
+  }
+
+  std::vector<PatchPose> convert_selected_patches_to_poses(
+    const SelectedPatchResult & selected_result,
+    const WallModel & wall) const
+  {
+    std::vector<PatchPose> poses;
+    poses.reserve(selected_result.selected_patches.size());
+
+    int patch_idx = 0;
+    for (const auto & selected_patch : selected_result.selected_patches) {
+      const Eigen::Vector3d wall_point =
+        wall.centroid + selected_patch.center_u * wall.axis_u + selected_patch.center_v * wall.axis_v;
+      const Eigen::Vector3d position = wall_point + wall.normal * (fov_distance_ + wall_distance_);
+      const Eigen::Vector3d forward = -wall.normal.normalized();
+      const Eigen::Vector3d right = wall.axis_u.normalized();
+      const Eigen::Vector3d up = wall.axis_v.normalized();
+
+      PatchPose patch;
+      patch.wall_id = wall.wall_id;
+      patch.patch_index = patch_idx++;
+      patch.axis_u = selected_patch.center_u;
+      patch.axis_v = selected_patch.center_v;
+      patch.roi_u_min = selected_patch.roi_polygon.center_u + selected_patch.roi_polygon.offset_u -
+        0.5 * selected_patch.roi_polygon.width;
+      patch.roi_u_max = selected_patch.roi_polygon.center_u + selected_patch.roi_polygon.offset_u +
+        0.5 * selected_patch.roi_polygon.width;
+      patch.roi_v_min = selected_patch.roi_polygon.center_v + selected_patch.roi_polygon.offset_v -
+        0.5 * selected_patch.roi_polygon.height;
+      patch.roi_v_max = selected_patch.roi_polygon.center_v + selected_patch.roi_polygon.offset_v +
+        0.5 * selected_patch.roi_polygon.height;
+      patch.pose.position.x = position.x();
+      patch.pose.position.y = position.y();
+      patch.pose.position.z = position.z();
+      patch.pose.orientation = quaternion_from_basis(right, up, forward);
+      poses.push_back(patch);
+    }
+
+    return poses;
   }
 
   void append_markers_for_patch(
@@ -957,24 +1407,18 @@ private:
   int selected_room_id_{0};
   std::vector<int> selected_wall_ids_;
   int plane_label_stride_{1000};
-  double distance_to_wall_{0.35};
+  double fov_distance_{0.35};
+  double wall_distance_{0.0};
   double overlap_{0.15};
+  double ee_size_x_{0.30};
+  double ee_size_y_{0.30};
+  double grid_resolution_{0.02};
+  double min_valid_roi_ratio_{0.65};
+  double min_new_coverage_ratio_{0.05};
   double roi_width_px_{-1.0};
   double roi_height_px_{-1.0};
   double roi_center_u_offset_px_{0.0};
   double roi_center_v_offset_px_{0.0};
-  double roi_width_ratio_{0.6};
-  double roi_height_ratio_{0.6};
-  double roi_center_u_offset_{0.0};
-  double roi_center_v_offset_{0.0};
-  double legacy_roi_u_min_{0.2};
-  double legacy_roi_u_max_{0.8};
-  double legacy_roi_v_min_{0.2};
-  double legacy_roi_v_max_{0.8};
-  double roi_u_min_{0.2};
-  double roi_u_max_{0.8};
-  double roi_v_min_{0.2};
-  double roi_v_max_{0.8};
   int max_tf_frames_{512};
 
   sensor_msgs::msg::PointCloud2::ConstSharedPtr latest_cloud_;

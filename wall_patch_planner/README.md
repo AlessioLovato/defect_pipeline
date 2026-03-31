@@ -17,12 +17,15 @@ This matches the RANSAC output convention you described.
 - `selected_room_id`: room/cluster to process
 - `selected_wall_ids`: array of wall ids to plan. Start with one wall, but multi-wall is supported.
 - `plane_label_stride`: stride used by the upstream RANSAC node
-- `distance_to_wall`: camera offset from wall plane, measured toward the room interior, default `0.35`
+- `fov_distance`: distance from the wall used to project the camera ROI footprint
+- `wall_distance`: additional standoff added behind the ROI plane for the final tool pose
 - `overlap`: patch overlap ratio
+- `ee_size_x`, `ee_size_y`: end-effector footprint on the wall plane in meters
+- `grid_resolution`: wall rasterization resolution in meters
+- `min_valid_roi_ratio`: minimum fraction of real wall support required inside a candidate ROI
+- `min_new_coverage_ratio`: minimum new wall coverage gain required for the greedy selector to accept another patch
 - `roi_width_px`, `roi_height_px`: ROI size in image pixels
 - `roi_center_u_offset_px`, `roi_center_v_offset_px`: ROI center offset from the image center in pixels, where `0.0` means centered
-- `roi_width_ratio`, `roi_height_ratio`, `roi_center_u_offset`, `roi_center_v_offset`: normalized fallback parameters kept for compatibility
-- `roi_u_min`, `roi_u_max`, `roi_v_min`, `roi_v_max`: legacy normalized ROI bounds still accepted for backward compatibility
 
 ## Topics
 Subscribes:
@@ -39,6 +42,36 @@ Publishes:
 - `/plan_patches` (`std_srvs/srv/Trigger`) when launched without a namespace
 
 The service uses the latest cached cloud + latest cached camera info already received by the node. The two messages do not need matching timestamps.
+
+## Multi-window filter demo node
+The package also provides a filtering helper that works wall-by-wall:
+
+- executable: `wall_patch_filter_demo_node`
+- service: `/wall_patch_filter_demo/filter_wall_poses`
+- input behavior:
+  - sets `wall_patch_planner.selected_wall_ids=[wall_id]`
+  - calls `/wall_patch_planner/plan_patches`
+  - listens to `/wall_patch_planner/poses` and `/wall_patch_planner/debug_markers`
+  - republishes only the poses and markers that match the requested world-space windows
+
+Filter service request:
+- `wall_id`: wall to refresh from the planner
+- `center_x[]`, `center_y[]`, `center_z[]`: world-space filter centers
+- `range[]`: radius around each center
+
+Filter service response:
+- `pose_indices[]`: indices of the matched poses in the planner output for that wall
+- `x[]`, `y[]`, `z[]`: world-space positions of the matched poses
+
+Filtered outputs:
+- `/wall_patch_planner/filter_demo/poses` (`geometry_msgs/PoseArray`)
+- `/wall_patch_planner/filter_demo/markers` (`visualization_msgs/MarkerArray`)
+
+Example with three windows on wall `1`:
+```bash
+ros2 service call /wall_patch_filter_demo/filter_wall_poses wall_patch_planner/srv/FilterWallPoses \
+  "{wall_id: 1, center_x: [0.4, 0.8, 1.2], center_y: [1.0, 1.0, 1.0], center_z: [1.1, 1.1, 1.1], range: [0.25, 0.25, 0.25]}"
+```
 
 ## Mock CameraInfo publisher
 For testing without a RealSense driver, the package now provides a C++ helper node:
@@ -63,7 +96,7 @@ ros2 run wall_patch_planner mock_camera_info_pub --ros-args \
 
 Or launch it together with the planner:
 ```bash
-ros2 launch wall_patch_planner wall_patch_planner.launch.py use_mock_camera_info:=true
+ros2 launch wall_patch_planner wall_patch_planner.launch.py use_mock_camera_info:=true use_filter_demo:=true
 ```
 
 ## Debug behavior
@@ -82,6 +115,9 @@ Arguments:
 
 ## Notes
 - The planner assumes vertical walls and world-up `+Z`.
-- Wall normals are oriented toward the selected room interior before applying `distance_to_wall`, so planned camera poses are translated to the inside of the room rather than outside the building envelope.
+- Wall normals are oriented toward the selected room interior before applying the final `fov_distance + wall_distance` pose offset, so planned camera poses are translated to the inside of the room rather than outside the building envelope.
+- ROI footprint sizing uses `fov_distance`, while the final pose offset uses `fov_distance + wall_distance`.
+- Near boundaries, the planner can shift the hard-footprint center inward while keeping the ROI target near the edge, so overlap can be used to preserve coverage without violating the outer wall constraint.
+- The patch selector uses a rasterized wall-support mask plus an outer wall envelope. Internal holes reduce ROI validity, but hard boundary erosion is only applied against the outer wall boundary.
 - Furniture is ignored; coverage is purely geometric.
 - The service publishes poses on a topic instead of returning them directly.
