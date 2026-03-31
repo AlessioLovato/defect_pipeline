@@ -2,11 +2,18 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
+import os
 
 
 def generate_launch_description():
+    default_world = os.path.join(
+        get_package_share_directory('harmonic_world_pointcloud_generator'),
+        'worlds',
+        'office.sdf',
+    )
     return LaunchDescription([
-        DeclareLaunchArgument('world_sdf_path', default_value='/home/ubuntu/ws/src/defect_pipeline/harmonic_world_pointcloud_generator/worlds/office.sdf'),
+        DeclareLaunchArgument('world_sdf_path', default_value=default_world),
         DeclareLaunchArgument('topic_name', default_value='/synthetic_world/points'),
         DeclareLaunchArgument('frame_id', default_value='map'),
         DeclareLaunchArgument('resolution', default_value='0.05'),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 
+from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -12,10 +13,15 @@ from .pointcloud_utils import numpy_to_pointcloud2, save_ascii_pcd, save_nav2_oc
 from .world_parser import parse_world_to_pointcloud
 
 
+def resolve_default_world_sdf_path() -> str:
+    share_dir = Path(get_package_share_directory('harmonic_world_pointcloud_generator'))
+    return str(share_dir / 'worlds' / 'office.sdf')
+
+
 class WorldPointCloudGeneratorNode(Node):
     def __init__(self) -> None:
         super().__init__('world_pointcloud_generator')
-        self.declare_parameter('world_sdf_path', '')
+        self.declare_parameter('world_sdf_path', resolve_default_world_sdf_path())
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('topic_name', '/synthetic_world/points')
         self.declare_parameter('resolution', 0.10)
@@ -102,7 +108,8 @@ class WorldPointCloudGeneratorNode(Node):
                   nav2_map_slice_thickness: float) -> tuple[bool, str, int]:
         if not world_sdf_path:
             return False, 'world_sdf_path is empty', 0
-        if not Path(world_sdf_path).exists():
+        world_path = Path(world_sdf_path)
+        if not world_path.exists():
             return False, f'world file does not exist: {world_sdf_path}', 0
         if resolution <= 0.0:
             return False, 'resolution must be > 0', 0
@@ -113,7 +120,7 @@ class WorldPointCloudGeneratorNode(Node):
 
         try:
             points = parse_world_to_pointcloud(
-                world_sdf_path,
+                str(world_path),
                 resolution,
                 bbox_min,
                 bbox_max,
@@ -132,7 +139,7 @@ class WorldPointCloudGeneratorNode(Node):
 
         if save_nav2_map:
             map_points = parse_world_to_pointcloud(
-                world_sdf_path,
+                str(world_path),
                 min(resolution, nav2_map_resolution),
                 bbox_min,
                 bbox_max,
