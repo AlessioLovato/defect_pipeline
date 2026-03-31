@@ -12,3 +12,9 @@ world_pointcloud_generator:
     auto_generate_on_startup: true
     auto_save_pcd: false
     pcd_path: world_scan.pcd
+    auto_save_nav2_map: false
+    nav2_map_yaml_path: world_scan_nav2.yaml
+    nav2_map_resolution: 0.05
+    use_nav2_map_height_slice: false
+    nav2_map_slice_height: 1.0
+    nav2_map_slice_thickness: 0.20

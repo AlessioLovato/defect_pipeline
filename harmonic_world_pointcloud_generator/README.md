@@ -6,12 +6,13 @@ A ROS 2 package for Gazebo Harmonic workflows that generates and publishes a syn
 
 The original `gazebo_map_creator` article / repository targets **Gazebo Classic** and uses a Classic plugin architecture plus APIs such as world plugins and Classic collision / ray mechanisms. The official migration guidance for new Gazebo replaces Classic integration with **Gazebo Sim + `ros_gz_sim`**, and Gazebo Classic itself is end-of-life. The Harmonic adaptation here keeps the same user-facing idea of synthetic 3D world sampling, but implements it by reading SDF geometry directly instead of relying on Classic-only plugin APIs.
 
-This version samples SDF primitive geometry (`box`, `cylinder`, `sphere`, `plane`) and publishes a `sensor_msgs/PointCloud2` topic when the node starts. It can also optionally save an ASCII `.pcd` file.
+This version samples SDF primitive geometry (`box`, `cylinder`, `sphere`, `plane`) and publishes a `sensor_msgs/PointCloud2` topic when the node starts. It can also optionally save an ASCII `.pcd` file and a Nav2-compatible map set: `.yaml`, `.pgm`, and `.png`.
 
 ## Features
 
 - Publishes `sensor_msgs/PointCloud2`
 - Optional `.pcd` export
+- Optional Nav2 `.yaml` + `.pgm` + `.png` occupancy-map export
 - Configurable surface sampling mode for indoor-wall workflows
 - Optional floor and ceiling sampling for semantic-segmentation testing
 - Intended for synthetic indoor worlds described with SDF primitives
@@ -80,6 +81,23 @@ ros2 launch harmonic_world_pointcloud_generator generate_from_world.launch.py \
   surface_mode:=all
 ```
 
+If you also want a Nav2 localization map saved on startup:
+
+```bash
+ros2 launch harmonic_world_pointcloud_generator generate_from_world.launch.py \
+  world_sdf_path:=/absolute/path/to/your.world \
+  resolution:=0.05 \
+  surface_mode:=interior_vertical \
+  auto_save_nav2_map:=true \
+  nav2_map_yaml_path:=/absolute/path/to/world_scan_nav2.yaml \
+  nav2_map_resolution:=0.05 \
+  use_nav2_map_height_slice:=true \
+  nav2_map_slice_height:=1.0 \
+  nav2_map_slice_thickness:=0.20
+```
+
+The Nav2 map export always uses `interior_vertical_with_caps` with `include_floor_and_ceiling=false`, so the saved 2D occupancy map keeps the short connector wall faces and ignores floor / ceiling surfaces even if the published 3D cloud uses different settings. The configured YAML path is the basename for the full export set: the node writes `*.yaml`, `*.pgm`, and `*.png` next to each other, and the YAML references the `.pgm` image in the standard map-server format.
+
 ## Main Parameters
 
 - `world_sdf_path`: absolute path to the SDF world file
@@ -91,6 +109,12 @@ ros2 launch harmonic_world_pointcloud_generator generate_from_world.launch.py \
 - `bbox_min` / `bbox_max`: crop volume for generated points
 - `auto_save_pcd`: save the generated cloud to disk
 - `pcd_path`: output path for the optional `.pcd` file
+- `auto_save_nav2_map`: save a Nav2-compatible occupancy map on startup
+- `nav2_map_yaml_path`: output path for the Nav2 `.yaml` file; matching `.pgm` and `.png` files are written next to it with the same basename
+- `nav2_map_resolution`: occupancy-map pixel size in meters
+- `use_nav2_map_height_slice`: when enabled, only points near the requested Z height contribute to the 2D map
+- `nav2_map_slice_height`: center Z value of the exported 2D map slice, in meters
+- `nav2_map_slice_thickness`: Z thickness of the exported slice, in meters
 
 ## Notes and limitations
 
