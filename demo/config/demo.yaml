@@ -1,0 +1,47 @@
+demo_orchestrator:
+  ros__parameters:
+    homing_service: /xbotcore/homing/switch
+    omnisteering_service: /xbotcore/omnisteering/switch
+    ros_ctrl_service: /xbotcore/ros_ctrl/switch
+    inter_switch_delay_sec: 10.0
+    service_timeout_sec: 10.0
+    nav2_state_service: /bt_navigator/get_state
+    nav2_wait_timeout_sec: 120.0
+    nav2_action_name: /navigate_to_pose
+    nav2_action_timeout_sec: 180.0
+    goal_frame: map
+    nav_goal_x: -8.5
+    nav_goal_y: 2.0
+    nav_goal_z: 0.0
+    nav_goal_qx: 0.0
+    nav_goal_qy: 0.0
+    nav_goal_qz: 1.0
+    nav_goal_qw: 0.0
+    filter_service_name: /wall_patch_filter_demo/filter_wall_poses
+    filtered_pose_topic: /wall_patch_planner/filter_demo/poses
+    filter_wall_id: 3
+    filter_windows: "[[-9.873077, 2.134507, 2.075000]]"
+    filter_windows_2: "[[-9.873078, 3.384507, 1.325000]]"
+    filter_range: 0.15
+    filter_wait_timeout_sec: 30.0
+    cartesian_namespace: /cartesian
+    cartesian_action_namespace: ""
+    cartesian_task_name: "tcp"
+    cartesian_lambda: 1.0
+    preferred_cartesian_tasks: [tcp]
+    cartesian_base_link: map
+    cartesian_activate_task: true
+    arm_reach_time_sec: 15.0
+    arm_action_timeout_sec: 60.0
+    reach_orientation_refine_enabled: true
+    reach_orientation_refine_threshold_rad: 0.15
+    reach_orientation_refine_max_attempts: 10
+    shutdown_on_completion: false
+    rotate_arm_target_z_deg: 0.0
+    joint_orientation_step_limit_rad: 0.5
+    require_exclusive_joint_command_topic: true
+    use_joint_command_mux: true
+    joint_command_mux_service: /xbotcore/command_mux/use_cartesio
+    raw_command_hold_sec: 1.0
+    joint_command_topic: /xbotcore/command_raw
+    joint_command_ctrl_mode: 1

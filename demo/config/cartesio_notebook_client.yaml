@@ -1,0 +1,15 @@
+cartesio_notebook_client_runner:
+  ros__parameters:
+    namespace: /cartesian
+    action_namespace: ""
+    task_name: ""
+    preferred_tasks: [tcp, left_hand, right_hand, left_foot, right_foot, com]
+    message_timeout_sec: 2.0
+    service_timeout_sec: 5.0
+    action_timeout_sec: 10.0
+    reach_time_sec: 3.0
+    target_delta_x: 0.10
+    target_delta_y: 0.0
+    target_delta_z: 0.0
+    call_setters: true
+    shutdown_on_completion: true
