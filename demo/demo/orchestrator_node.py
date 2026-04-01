@@ -599,10 +599,6 @@ class DemoOrchestrator(Node):
         )
         return transformed_pose
 
-    def _debug_frame_label(self, frame_id: str) -> str:
-        label = frame_id.strip('/').replace('/', '_')
-        return label or 'unnamed_frame'
-
     def _make_transform(self, parent_frame: str, child_frame: str, pose: Pose) -> TransformStamped:
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg()
@@ -984,36 +980,44 @@ class DemoOrchestrator(Node):
         )
         return waypoints, times
 
-    def _reach_with_orientation_refine(
+    def _make_pose_stamped(self, frame_id: str, pose: Pose) -> PoseStamped:
+        stamped = PoseStamped()
+        stamped.header.stamp = self.get_clock().now().to_msg()
+        stamped.header.frame_id = frame_id
+        stamped.pose = copy_pose(pose)
+        return stamped
+
+    def _execute_reach(
         self,
         ci: CartesioRos2Client,
         task_name: str,
-        initial_poses: List[Pose],
-        initial_times: List[float],
-        final_target_pose: Pose,
-        task_base_link: str,
-        min_joint_state_seq: int = 1,
-        apply_orientation_alignment: bool = True,
-    ) -> Tuple[dict, List[dict], List[dict]]:
-        reach_result, feedback_log = ci.reach(
+        reach_poses: List[Pose],
+        reach_times: List[float],
+    ) -> Tuple[dict, List[dict]]:
+        self.get_logger().info(
+            f"Reach request: sending {len(reach_poses)} waypoint(s) to action '{task_name}/reach'"
+        )
+        return ci.reach(
             task_name,
-            poses=initial_poses,
-            times=initial_times,
+            poses=reach_poses,
+            times=reach_times,
             incremental=False,
             timeout_sec=self.arm_action_timeout_sec,
         )
-        attempt_results = [
-            {
-                "mode": "tcp_reach",
-                "result": reach_result,
-            }
-        ]
 
-        if not apply_orientation_alignment:
-            return reach_result, feedback_log, attempt_results
+    def _align_after_reach(
+        self,
+        reach_result: dict,
+        task_base_link: str,
+        min_joint_state_seq: int = 1,
+        enabled: bool = True,
+    ) -> List[dict]:
+        attempt_results: List[dict] = []
+        if not enabled:
+            return attempt_results
 
         if not self.reach_orientation_refine_enabled:
-            return reach_result, feedback_log, attempt_results
+            return attempt_results
 
         orientation_error = float(reach_result.get('orientation_error_angle', float('inf')))
         if (
@@ -1024,7 +1028,7 @@ class DemoOrchestrator(Node):
             reach_result["orientation_error_angle_from_reach"] = orientation_error
             reach_result["orientation_error_angle"] = float(tf_error["orientation_error_angle_rad"])
             reach_result["orientation_error_angle_source"] = "tf_before_alignment"
-            return reach_result, feedback_log, attempt_results
+            return attempt_results
 
         self.get_logger().info(
             "Orientation error above threshold; "
@@ -1032,12 +1036,20 @@ class DemoOrchestrator(Node):
             f"threshold={self.reach_orientation_refine_threshold_rad:.6f} rad"
         )
         correction_limit = max(1, int(self.reach_orientation_refine_max_attempts))
-        self._set_joint_command_mux(use_cartesio=False, force=True)
+        self._set_joint_command_mux(
+            use_cartesio=False,
+            force=True,
+            context='orientation_alignment_prepare',
+        )
         try:
             for attempt_idx in range(1, correction_limit + 1):
                 if orientation_error <= self.reach_orientation_refine_threshold_rad:
                     break
-                self._set_joint_command_mux(use_cartesio=False, force=True)
+                self._set_joint_command_mux(
+                    use_cartesio=False,
+                    force=True,
+                    context=f'orientation_alignment_attempt_{attempt_idx}',
+                )
                 correction_report = self._correct_joint7_from_tf(
                     task_base_link=task_base_link,
                     min_joint_state_seq=max(min_joint_state_seq, self._joint_state_seq),
@@ -1076,7 +1088,7 @@ class DemoOrchestrator(Node):
                 f"max_attempts={correction_limit}"
             )
 
-        return reach_result, feedback_log, attempt_results
+        return attempt_results
 
     def _qualify(self, base: str, suffix: str) -> str:
         suffix = suffix.lstrip('/')
@@ -1206,16 +1218,33 @@ class DemoOrchestrator(Node):
             raise TimeoutError(f"Timed out waiting for Nav2 action '{self.nav2_action_name}'")
         self.get_logger().info(f"Nav2 action '{self.nav2_action_name}' is ready")
 
-    def _set_joint_command_mux(self, use_cartesio: bool, force: bool = False) -> None:
+    def _set_joint_command_mux(
+        self,
+        use_cartesio: bool,
+        force: bool = False,
+        context: str = '',
+    ) -> None:
+        source = 'cartesio' if use_cartesio else 'raw'
+        context_label = f" [{context}]" if context else ''
         if not self.use_joint_command_mux:
+            self.get_logger().info(
+                f"Skipping joint command mux switch{context_label}: mux integration is disabled"
+            )
             return
         if (
             not force
             and self._joint_command_mux_state is not None
             and self._joint_command_mux_state == use_cartesio
         ):
+            self.get_logger().info(
+                f"Skipping joint command mux switch{context_label}: already on '{source}'"
+            )
             return
 
+        self.get_logger().info(
+            f"Joint command mux request{context_label}: switching to '{source}' "
+            f"via service '{self.joint_command_mux_service}'"
+        )
         request = SetBool.Request()
         request.data = bool(use_cartesio)
         response = self._call_service(
@@ -1230,7 +1259,6 @@ class DemoOrchestrator(Node):
                 f"use_cartesio={use_cartesio}: {response.message}"
             )
         self._joint_command_mux_state = use_cartesio
-        source = 'cartesio' if use_cartesio else 'raw'
         self.get_logger().info(
             f"Joint command mux switched to '{source}' via '{self.joint_command_mux_service}'"
         )
@@ -1338,267 +1366,280 @@ class DemoOrchestrator(Node):
             f"Nav2 goal completed successfully with status={result_msg.status} result={result_msg.result}"
         )
 
-    def _send_arm_goal(self, planner_frame: str, pose: Pose) -> None:
-        ci = CartesioRos2Client(
-            namespace=self.cartesian_namespace,
-            action_namespace=self.cartesian_action_namespace,
-            node_name="demo_cartesio_client",
+    def _prepare_cartesian_task(self, ci: CartesioRos2Client) -> Tuple[str, object]:
+        task_list = ci.get_task_list()
+        self.get_logger().info(
+            pprint.pformat(
+                {
+                    "namespace": ci.namespace,
+                    "action_namespace": ci.action_namespace or "/",
+                    "tasks": list(zip(task_list.names, task_list.types)),
+                }
+            )
         )
-        try:
-            self._set_joint_command_mux(use_cartesio=True, force=True)
-            task_list = ci.get_task_list()
-            self.get_logger().info(
-                pprint.pformat(
-                    {
-                        "namespace": ci.namespace,
-                        "action_namespace": ci.action_namespace or "/",
-                        "tasks": list(zip(task_list.names, task_list.types)),
-                    }
-                )
-            )
 
-            cartesian_candidates = [
-                name for name, task_type in zip(task_list.names, task_list.types) if task_type == "Cartesian"
+        cartesian_candidates = [
+            name for name, task_type in zip(task_list.names, task_list.types) if task_type == "Cartesian"
+        ]
+        task_name = self.cartesian_task_name or next(
+            (name for name in self.preferred_cartesian_tasks if name in cartesian_candidates),
+            None,
+        )
+        if task_name is None and cartesian_candidates:
+            task_name = cartesian_candidates[0]
+        if task_name is None:
+            raise RuntimeError("No Cartesian task is available for the arm reach action")
+
+        task_info = ci.get_task_info(task_name)
+        cartesian_info = ci.get_cartesian_task_info(task_name)
+        current_reference = ci.wait_for_message(
+            PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
+        )
+        self.get_logger().info(
+            pprint.pformat(
+                {
+                    "task_name": task_name,
+                    "generic": {
+                        "type": list(task_info.type),
+                        "lambda1": task_info.lambda1,
+                        "lambda2": task_info.lambda2,
+                        "activation_state": task_info.activation_state,
+                        "size": task_info.size,
+                        "indices": list(task_info.indices),
+                    },
+                    "cartesian": {
+                        "base_link": cartesian_info.base_link,
+                        "distal_link": cartesian_info.distal_link,
+                        "control_mode": cartesian_info.control_mode,
+                        "state": cartesian_info.state,
+                        "max_vel_lin": cartesian_info.max_vel_lin,
+                        "max_vel_ang": cartesian_info.max_vel_ang,
+                        "max_acc_lin": cartesian_info.max_acc_lin,
+                        "max_acc_ang": cartesian_info.max_acc_ang,
+                    },
+                    "current_reference": pose_to_dict(current_reference.pose),
+                }
+            )
+        )
+
+        lambda_to_set = float(task_info.lambda1)
+        lambda_response = ci.set_lambda(task_name, lambda_to_set)
+        active_response = ci.set_task_active(task_name, task_info.activation_state.lower() == "enabled")
+        base_link_response = ci.set_base_link(task_name, cartesian_info.base_link)
+        control_mode_response = ci.set_control_mode(task_name, cartesian_info.control_mode)
+        self.get_logger().info(
+            pprint.pformat(
+                {
+                    "set_lambda": {
+                        "success": lambda_response.success,
+                        "message": lambda_response.message,
+                        "value": lambda_to_set,
+                    },
+                    "set_active": {
+                        "success": active_response.success,
+                        "message": active_response.message,
+                    },
+                    "set_base_link": {
+                        "success": base_link_response.success,
+                        "message": base_link_response.message,
+                    },
+                    "set_control_mode": {
+                        "success": control_mode_response.success,
+                        "message": control_mode_response.message,
+                    },
+                }
+            )
+        )
+        return task_name, cartesian_info
+
+    def _build_reach_request(
+        self,
+        task_base_link: str,
+        reference_before: PoseStamped,
+        planner_frame: str | None = None,
+        planner_pose: Pose | None = None,
+        filter_windows_raw: str | None = None,
+        filter_param_name: str = 'filter_windows',
+        explicit_waypoints: List[Pose] | None = None,
+        explicit_times: List[float] | None = None,
+    ) -> dict:
+        mode_count = sum(
+            int(enabled)
+            for enabled in [
+                explicit_waypoints is not None or explicit_times is not None,
+                filter_windows_raw is not None,
+                planner_frame is not None or planner_pose is not None,
             ]
-            task_name = self.cartesian_task_name or next(
-                (name for name in self.preferred_cartesian_tasks if name in cartesian_candidates),
-                None,
+        )
+        if mode_count != 1:
+            raise ValueError(
+                "Exactly one movement input mode is required: explicit waypoints/times, filter window, or pose."
             )
-            if task_name is None and cartesian_candidates:
-                task_name = cartesian_candidates[0]
-            if task_name is None:
-                raise RuntimeError("No Cartesian task is available for the arm reach action")
 
-            task_info = ci.get_task_info(task_name)
-            cartesian_info = ci.get_cartesian_task_info(task_name)
-            current_reference = ci.wait_for_message(
-                PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
+        if explicit_waypoints is not None or explicit_times is not None:
+            if explicit_waypoints is None or explicit_times is None:
+                raise ValueError('Explicit movement mode requires both explicit_waypoints and explicit_times')
+            if not explicit_waypoints:
+                raise ValueError('explicit_waypoints must be non-empty')
+            if len(explicit_waypoints) != len(explicit_times):
+                raise ValueError(
+                    f"Explicit waypoints/times mismatch: {len(explicit_waypoints)} vs {len(explicit_times)}"
+                )
+            return {
+                "input_mode": "explicit_waypoints",
+                "planner_frame": task_base_link,
+                "planner_pose": copy_pose(explicit_waypoints[-1]),
+                "target_pose": copy_pose(explicit_waypoints[-1]),
+                "reach_waypoints": [copy_pose(waypoint) for waypoint in explicit_waypoints],
+                "reach_times": [float(value) for value in explicit_times],
+                "selection_debug": None,
+            }
+
+        selected_planner_frame = planner_frame
+        selected_planner_pose = planner_pose
+        selection_debug = None
+        if filter_windows_raw is not None:
+            filtered = self._request_filtered_poses(
+                windows_raw=filter_windows_raw,
+                param_name=filter_param_name,
             )
+            selected_planner_frame = filtered.header.frame_id
+            selected_planner_pose = filtered.poses[0]
+            selection_debug = {
+                "filtered_param": filter_param_name,
+                "selected_filtered_pose": pose_to_dict(selected_planner_pose),
+                "selected_filtered_frame": selected_planner_frame,
+            }
+
+        if selected_planner_frame is None or selected_planner_pose is None:
+            raise ValueError("Pose movement mode requires both planner_frame and planner_pose")
+
+        target_pose = self._transform_pose_to_frame(
+            selected_planner_frame,
+            task_base_link,
+            selected_planner_pose,
+        )
+        if abs(self.rotate_arm_target_z_deg) > 1e-6:
             self.get_logger().info(
-                pprint.pformat(
-                    {
-                        "task_name": task_name,
-                        "generic": {
-                            "type": list(task_info.type),
-                            "lambda1": task_info.lambda1,
-                            "lambda2": task_info.lambda2,
-                            "activation_state": task_info.activation_state,
-                            "size": task_info.size,
-                            "indices": list(task_info.indices),
-                        },
-                        "cartesian": {
-                            "base_link": cartesian_info.base_link,
-                            "distal_link": cartesian_info.distal_link,
-                            "control_mode": cartesian_info.control_mode,
-                            "state": cartesian_info.state,
-                            "max_vel_lin": cartesian_info.max_vel_lin,
-                            "max_vel_ang": cartesian_info.max_vel_ang,
-                            "max_acc_lin": cartesian_info.max_acc_lin,
-                            "max_acc_ang": cartesian_info.max_acc_ang,
-                        },
-                        "current_reference": pose_to_dict(current_reference.pose),
-                    }
-                )
+                f"Rotating arm target around local z by {self.rotate_arm_target_z_deg:.1f} deg"
             )
-
-            lambda_to_set = float(task_info.lambda1)
-            lambda_response = ci.set_lambda(task_name, lambda_to_set)
-            active_response = ci.set_task_active(task_name, task_info.activation_state.lower() == "enabled")
-            base_link_response = ci.set_base_link(task_name, cartesian_info.base_link)
-            control_mode_response = ci.set_control_mode(task_name, cartesian_info.control_mode)
-            self.get_logger().info(
-                pprint.pformat(
-                    {
-                        "set_lambda": {
-                            "success": lambda_response.success,
-                            "message": lambda_response.message,
-                            "value": lambda_to_set,
-                        },
-                        "set_active": {
-                            "success": active_response.success,
-                            "message": active_response.message,
-                        },
-                        "set_base_link": {
-                            "success": base_link_response.success,
-                            "message": base_link_response.message,
-                        },
-                        "set_control_mode": {
-                            "success": control_mode_response.success,
-                            "message": control_mode_response.message,
-                        },
-                    }
-                )
-            )
-
-            reference_before = ci.wait_for_message(
-                PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
-            )
-            target_pose = self._transform_pose_to_frame(planner_frame, cartesian_info.base_link, pose)
-            if abs(self.rotate_arm_target_z_deg) > 1e-6:
-                self.get_logger().info(
-                    f"Rotating arm target around local z by {self.rotate_arm_target_z_deg:.1f} deg"
-                )
-                target_pose = rotate_pose_about_local_z(
-                    target_pose,
-                    math.radians(self.rotate_arm_target_z_deg),
-                )
-            self._publish_debug_target_tfs(
-                planner_frame,
-                cartesian_info.base_link,
-                pose,
+            target_pose = rotate_pose_about_local_z(
                 target_pose,
-            )
-            if self.debug_publish_only:
-                self.get_logger().info(
-                    'Debug TFs published; skipping CartesIO reach because debug_publish_only is true'
-                )
-                return
-            waypoint_poses, waypoint_times = self._build_tcp_waypoints(
-                planner_frame,
-                cartesian_info.base_link,
-                reference_before,
-                target_pose,
-            )
-            self._set_joint_command_mux(use_cartesio=True, force=True)
-            joint_state_seq_before_reach = self._joint_state_seq
-            reach_result, feedback_log, reach_attempt_results = self._reach_with_orientation_refine(
-                ci=ci,
-                task_name=task_name,
-                initial_poses=waypoint_poses,
-                initial_times=waypoint_times,
-                final_target_pose=target_pose,
-                task_base_link=cartesian_info.base_link,
-                min_joint_state_seq=max(1, joint_state_seq_before_reach),
+                math.radians(self.rotate_arm_target_z_deg),
             )
 
-            reference_after = ci.wait_for_message(
-                PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
-            )
+        self._publish_debug_target_tfs(
+            selected_planner_frame,
+            task_base_link,
+            selected_planner_pose,
+            target_pose,
+        )
+        reach_waypoints, reach_times = self._build_tcp_waypoints(
+            selected_planner_frame,
+            task_base_link,
+            reference_before,
+            target_pose,
+        )
+        return {
+            "input_mode": "filter_window" if filter_windows_raw is not None else "direct_pose",
+            "planner_frame": selected_planner_frame,
+            "planner_pose": copy_pose(selected_planner_pose),
+            "target_pose": copy_pose(target_pose),
+            "reach_waypoints": [copy_pose(waypoint) for waypoint in reach_waypoints],
+            "reach_times": [float(value) for value in reach_times],
+            "selection_debug": selection_debug,
+        }
+
+    def _execute_reach_phase(
+        self,
+        ci: CartesioRos2Client,
+        task_name: str,
+        task_base_link: str,
+        reference_before: PoseStamped,
+        phase_context: str,
+        planner_frame: str | None = None,
+        planner_pose: Pose | None = None,
+        filter_windows_raw: str | None = None,
+        filter_param_name: str = 'filter_windows',
+        explicit_waypoints: List[Pose] | None = None,
+        explicit_times: List[float] | None = None,
+    ) -> dict:
+        reach_request = self._build_reach_request(
+            task_base_link=task_base_link,
+            reference_before=reference_before,
+            planner_frame=planner_frame,
+            planner_pose=planner_pose,
+            filter_windows_raw=filter_windows_raw,
+            filter_param_name=filter_param_name,
+            explicit_waypoints=explicit_waypoints,
+            explicit_times=explicit_times,
+        )
+        if self.debug_publish_only and reach_request["input_mode"] != "explicit_waypoints":
             self.get_logger().info(
-                pprint.pformat(
-                    {
-                        "planner_frame": planner_frame,
-                        "task_base_link": cartesian_info.base_link,
-                        "reference_before": pose_to_dict(reference_before.pose),
-                        "planner_target_pose": pose_to_dict(pose),
-                        "reach_waypoints": [pose_to_dict(waypoint) for waypoint in waypoint_poses],
-                        "reach_times": waypoint_times,
-                        "target_pose": pose_to_dict(target_pose),
-                        "reference_after": pose_to_dict(reference_after.pose),
-                        "joint_state_seq_before_reach": joint_state_seq_before_reach,
-                        "joint_state_seq_after_reach": self._joint_state_seq,
-                        "result": reach_result,
-                        "reach_attempt_results": reach_attempt_results,
-                        "feedback_samples_collected": len(feedback_log),
-                        "last_feedback": feedback_log[-1] if feedback_log else None,
-                    }
-                )
+                f"Skipping reach phase '{phase_context}' because debug_publish_only is true"
             )
+            return {
+                "phase_context": phase_context,
+                "skipped_debug_only": True,
+                **reach_request,
+            }
 
-            if self.run_second_tcp_waypoint_task:
-                self.get_logger().info(
-                    f"Waiting {self.second_tcp_wait_sec:.2f}s before second tcp waypoint task"
-                )
-                time.sleep(max(0.0, self.second_tcp_wait_sec))
-                second_waypoints, second_times = self._build_second_tcp_waypoints(cartesian_info.base_link)
-                self._set_joint_command_mux(use_cartesio=True, force=True)
-                joint_state_seq_before_second_tcp = self._joint_state_seq
-                second_result, second_feedback, second_attempt_results = self._reach_with_orientation_refine(
-                    ci=ci,
-                    task_name=task_name,
-                    initial_poses=second_waypoints,
-                    initial_times=second_times,
-                    final_target_pose=second_waypoints[-1],
-                    task_base_link=cartesian_info.base_link,
-                    min_joint_state_seq=max(1, joint_state_seq_before_second_tcp),
-                    apply_orientation_alignment=False,
-                )
-                self.get_logger().info(
-                    pprint.pformat(
-                        {
-                            "second_tcp_reach_waypoints": [pose_to_dict(pose) for pose in second_waypoints],
-                            "second_tcp_reach_times": second_times,
-                            "second_tcp_result": second_result,
-                            "second_tcp_attempt_results": second_attempt_results,
-                            "second_tcp_feedback_samples_collected": len(second_feedback),
-                            "second_tcp_last_feedback": second_feedback[-1] if second_feedback else None,
-                        }
-                    )
-                )
+        self._set_joint_command_mux(
+            use_cartesio=True,
+            force=True,
+            context=f"{phase_context}_reach",
+        )
+        joint_state_seq_before_reach = self._joint_state_seq
+        reach_result, feedback_log = self._execute_reach(
+            ci=ci,
+            task_name=task_name,
+            reach_poses=reach_request["reach_waypoints"],
+            reach_times=reach_request["reach_times"],
+        )
+        reference_after = ci.wait_for_message(
+            PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
+        )
+        return {
+            "phase_context": phase_context,
+            "skipped_debug_only": False,
+            **reach_request,
+            "reference_before": pose_to_dict(reference_before.pose),
+            "reference_after": pose_to_dict(reference_after.pose),
+            "reach_result": reach_result,
+            "feedback_log": feedback_log,
+            "joint_state_seq_before_reach": joint_state_seq_before_reach,
+            "joint_state_seq_after_reach": self._joint_state_seq,
+            "min_joint_state_seq_for_alignment": max(1, joint_state_seq_before_reach),
+        }
 
-            if self.filter_windows_2 and self.filter_windows_2.strip():
-                self.get_logger().info(
-                    "Starting second-window lookup using filter_windows_2 after waypoint task"
-                )
-                second_filtered = self._request_filtered_poses(
-                    windows_raw=self.filter_windows_2,
-                    param_name='filter_windows_2',
-                )
-                second_pose = second_filtered.poses[0]
-                second_frame = second_filtered.header.frame_id
-                second_target_pose = self._transform_pose_to_frame(
-                    second_frame,
-                    cartesian_info.base_link,
-                    second_pose,
-                )
-                self._publish_debug_target_tfs(
-                    second_frame,
-                    cartesian_info.base_link,
-                    second_pose,
-                    second_target_pose,
-                )
-                reference_before_second_window = ci.wait_for_message(
-                    PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
-                )
-                second_window_waypoints, second_window_times = self._build_tcp_waypoints(
-                    second_frame,
-                    cartesian_info.base_link,
-                    reference_before_second_window,
-                    second_target_pose,
-                )
-                self._set_joint_command_mux(use_cartesio=True, force=True)
-                second_window_result, second_window_feedback, second_window_attempt_results = (
-                    self._reach_with_orientation_refine(
-                        ci=ci,
-                        task_name=task_name,
-                        initial_poses=second_window_waypoints,
-                        initial_times=second_window_times,
-                        final_target_pose=second_target_pose,
-                        task_base_link=cartesian_info.base_link,
-                        min_joint_state_seq=max(1, self._joint_state_seq),
-                    )
-                )
-                self.get_logger().info(
-                    pprint.pformat(
-                        {
-                            "second_window_lookup_pose": pose_to_dict(second_pose),
-                            "second_window_target_pose": pose_to_dict(second_target_pose),
-                            "second_window_reach_waypoints": [
-                                pose_to_dict(waypoint) for waypoint in second_window_waypoints
-                            ],
-                            "second_window_reach_times": second_window_times,
-                            "second_window_result": second_window_result,
-                            "second_window_attempt_results": second_window_attempt_results,
-                            "second_window_feedback_samples_collected": len(second_window_feedback),
-                            "second_window_last_feedback": (
-                                second_window_feedback[-1] if second_window_feedback else None
-                            ),
-                        }
-                    )
-                )
-        finally:
-            try:
-                self.get_logger().info(
-                    "Not forcing mux restore on exit; current source is kept until next TCP reach request"
-                )
-            except Exception as exc:  # pylint: disable=broad-except
-                self.get_logger().warning(f"Failed to restore joint command mux to cartesio: {exc}")
-            ci.node.destroy_node()
+    def _execute_alignment_phase(
+        self,
+        phase_context: str,
+        reach_result: dict,
+        task_base_link: str,
+        min_joint_state_seq: int,
+    ) -> dict:
+        alignment_attempt_results = self._align_after_reach(
+            reach_result=reach_result,
+            task_base_link=task_base_link,
+            min_joint_state_seq=min_joint_state_seq,
+            enabled=True,
+        )
+        return {
+            "phase_context": phase_context,
+            "alignment_attempt_results": alignment_attempt_results,
+            "alignment_result": reach_result,
+        }
+
+    def _run_phase_placeholder(self, phase_context: str, description: str) -> None:
+        self.get_logger().info(f"{phase_context}: placeholder - {description}")
 
     def _run_sequence(self) -> None:
         try:
             # self.get_logger().info('Starting demo orchestration sequence')
-            self.get_logger().info('Step 1/5: enabling homing switch')
+            self.get_logger().info(
+                'Step 1/12: switch and nav preamble (calls below are intentionally commented)'
+            )
             # self._call_switch(self.homing_service)
             # self.get_logger().info(
             #     f"Step 1/5 complete; sleeping {self.inter_switch_delay_sec:.1f} s before omnisteering switch"
@@ -1611,6 +1652,7 @@ class DemoOrchestrator(Node):
             # time.sleep(12)
             # self.get_logger().info('Step 3/5: waiting for Nav2 readiness')
             # self._wait_for_nav2_active()
+            self.get_logger().info('Step 4/12: request first filtered pose')
             filtered_poses = self._request_filtered_poses()
             # self.get_logger().info('Step 4/5: requesting filtered wall poses')
             # self.get_logger().info(
@@ -1619,7 +1661,119 @@ class DemoOrchestrator(Node):
             # self.get_logger().info('Step 5/5a: sending Nav2 goal')
             # self._send_nav_goal()
             # self.get_logger().info('Step 5/5b: sending Cartesian arm goal to first filtered pose')
-            self._send_arm_goal(filtered_poses.header.frame_id, filtered_poses.poses[0])
+
+            ci = CartesioRos2Client(
+                namespace=self.cartesian_namespace,
+                action_namespace=self.cartesian_action_namespace,
+                node_name="demo_cartesio_client",
+            )
+            try:
+                self.get_logger().info(
+                    "Step 5/12: setup CartesIO task and request mux switch to cartesio"
+                )
+                self._set_joint_command_mux(use_cartesio=True, force=True, context='arm_setup')
+                task_name, cartesian_info = self._prepare_cartesian_task(ci)
+
+                self.get_logger().info("Step 6/12: arm movement phase 1 (waypoint + pose 1)")
+                reference_before_first = ci.wait_for_message(
+                    PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
+                )
+                phase_1_movement = self._execute_reach_phase(
+                    ci=ci,
+                    task_name=task_name,
+                    task_base_link=cartesian_info.base_link,
+                    reference_before=reference_before_first,
+                    phase_context='phase_1_arm_movement',
+                    planner_frame=filtered_poses.header.frame_id,
+                    planner_pose=filtered_poses.poses[0],
+                )
+                if phase_1_movement["skipped_debug_only"]:
+                    self.get_logger().info(
+                        "Phase 1 movement skipped because debug_publish_only=true; ending sequence early"
+                    )
+                    return
+
+                self.get_logger().info("Step 7/12: alignment phase 1")
+                phase_2_alignment = self._execute_alignment_phase(
+                    phase_context='phase_2_alignment_1',
+                    reach_result=phase_1_movement["reach_result"],
+                    task_base_link=cartesian_info.base_link,
+                    min_joint_state_seq=phase_1_movement["min_joint_state_seq_for_alignment"],
+                )
+
+                self.get_logger().info("Step 8/12: placeholder phase 1")
+                self._run_phase_placeholder(
+                    phase_context='phase_3_placeholder_task_1',
+                    description='implement task-specific action here',
+                )
+
+                self.get_logger().info("Step 9/12: second filtering with filter_windows_2")
+                if not self.filter_windows_2 or not self.filter_windows_2.strip():
+                    raise RuntimeError("filter_windows_2 is required for the second arm goal phase but is empty")
+                second_filtered = self._request_filtered_poses(
+                    windows_raw=self.filter_windows_2,
+                    param_name='filter_windows_2',
+                )
+                second_filtered_frame = second_filtered.header.frame_id
+                second_filtered_pose = second_filtered.poses[0]
+                reference_before_second = self._make_pose_stamped(
+                    cartesian_info.base_link,
+                    phase_1_movement["target_pose"],
+                )
+
+                self.get_logger().info("Step 10/12: arm movement phase 2 (waypoint + pose 2)")
+                phase_5_movement = self._execute_reach_phase(
+                    ci=ci,
+                    task_name=task_name,
+                    task_base_link=cartesian_info.base_link,
+                    reference_before=reference_before_second,
+                    phase_context='phase_5_waypoint_pose_2_movement',
+                    planner_frame=second_filtered_frame,
+                    planner_pose=second_filtered_pose,
+                )
+                if phase_5_movement["skipped_debug_only"]:
+                    self.get_logger().info(
+                        "Phase 2 movement skipped because debug_publish_only=true; ending sequence early"
+                    )
+                    return
+
+                self.get_logger().info("Step 11/12: alignment phase 2")
+                phase_6_alignment = self._execute_alignment_phase(
+                    phase_context='phase_6_alignment_2',
+                    reach_result=phase_5_movement["reach_result"],
+                    task_base_link=cartesian_info.base_link,
+                    min_joint_state_seq=phase_5_movement["min_joint_state_seq_for_alignment"],
+                )
+
+                self.get_logger().info("Step 12/12: placeholder phase 2")
+                self._run_phase_placeholder(
+                    phase_context='phase_7_placeholder_task_2',
+                    description='implement second task-specific action here',
+                )
+
+                self.get_logger().info(
+                    pprint.pformat(
+                        {
+                            "phase_1_movement": phase_1_movement,
+                            "phase_2_alignment": phase_2_alignment,
+                            "phase_4_second_filtering": {
+                                "selected_pose": pose_to_dict(second_filtered_pose),
+                                "selected_frame": second_filtered_frame,
+                            },
+                            "phase_5_movement": phase_5_movement,
+                            "phase_6_alignment": phase_6_alignment,
+                        }
+                    )
+                )
+            finally:
+                try:
+                    self.get_logger().info(
+                        "Not forcing mux restore on exit; current source is kept until next TCP reach request"
+                    )
+                except Exception as exc:  # pylint: disable=broad-except
+                    self.get_logger().warning(f"Failed to restore joint command mux to cartesio: {exc}")
+                ci.node.destroy_node()
+
             self.get_logger().info('Demo orchestration completed successfully')
         except Exception as exc:  # pylint: disable=broad-except
             self.get_logger().error(f'Demo orchestration failed: {exc}')

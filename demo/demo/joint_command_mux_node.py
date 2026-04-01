@@ -68,12 +68,12 @@ class JointCommandMuxNode(Node):
     def _forward_if_selected(self, msg: JointCommand, source: str) -> None:
         selected = self._selected_source_name()
         if source != selected:
-            self._dropped_count += 1
-            if self._dropped_count <= 5 or self._dropped_count % 100 == 0:
-                self.get_logger().info(
-                    f"Dropped command from '{source}' (selected='{selected}') "
-                    f"dropped_total={self._dropped_count}"
-                )
+            # self._dropped_count += 1
+            # if self._dropped_count <= 5 or self._dropped_count % 100 == 0:
+            #     self.get_logger().info(
+            #         f"Dropped command from '{source}' (selected='{selected}') "
+            #         f"dropped_total={self._dropped_count}"
+            #     )
             return
 
         self.output_pub.publish(msg)
