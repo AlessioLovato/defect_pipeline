@@ -39,7 +39,6 @@ def _build_cartesio_include(context, *args, **kwargs):
         )
     ]
 
-
 def generate_launch_description():
     joint_command_mux = Node(
         package='demo',
@@ -100,7 +99,7 @@ def generate_launch_description():
                 else []
             )
         ),
-        debug_tf,
+        # debug_tf,
         TimerAction(
             period=LaunchConfiguration('start_orchestrator_delay_sec'),
             actions=[orchestrator],

@@ -18,9 +18,12 @@ from cartesian_interface_ros.srv import (
     SetLambda,
     SetTaskActive,
 )
+from defect_map_interfaces.srv import CaptureShot
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped, TransformStamped
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -29,7 +32,6 @@ from rclpy.time import Time
 from std_srvs.srv import SetBool
 from tf2_ros import (
     Buffer,
-    StaticTransformBroadcaster,
     TransformBroadcaster,
     TransformException,
     TransformListener,
@@ -336,6 +338,14 @@ class DemoOrchestrator(Node):
         self.declare_parameter('joint_command_topic', '/xbotcore/command')
         self.declare_parameter('joint_command_ctrl_mode', 1)
         self.declare_parameter('joint_orientation_step_limit_rad', 0.5)
+        self.declare_parameter('joint_orientation_skip_threshold_rad', 0.1)
+        self.declare_parameter('first_alignment_use_hardcoded_joint7', True)
+        self.declare_parameter('first_alignment_joint7_positions', [-0.1, 0.1])
+        self.declare_parameter('first_alignment_append_reverse', True)
+        self.declare_parameter('second_alignment_use_hardcoded_joint7', True)
+        self.declare_parameter('second_alignment_joint7_positions', [-0.5, -1.0, -1.15])
+        self.declare_parameter('second_alignment_joint_hold_sec', 0.6)
+        self.declare_parameter('post_snapshot_2_reverse_hardcoded_joint7', True)
         self.declare_parameter('require_exclusive_joint_command_topic', True)
         self.declare_parameter('use_joint_command_mux', True)
         self.declare_parameter('joint_command_mux_service', '/xbotcore/command_mux/use_cartesio')
@@ -346,6 +356,22 @@ class DemoOrchestrator(Node):
         self.declare_parameter('debug_selected_pose_frame', 'selected_filtered_pose')
         self.declare_parameter('debug_selected_pose_base_link_frame', 'selected_filtered_pose_base_link')
         self.declare_parameter('debug_ee_pose_frame', 'demo_debug_arm_target_pose')
+        self.declare_parameter('defect_capture_service_name', '/defect_localization/capture_shot')
+        self.declare_parameter('defect_capture_timeout_sec', 10.0)
+        self.declare_parameter('defect_capture_shot_ids', [1, 2, 3, 4])
+        self.declare_parameter('defect_capture_max_retries_per_shot', 3)
+        self.declare_parameter('defect_capture_settle_sec', 0.5)
+        self.declare_parameter('defect_capture_wait_after_quartet_sec', 0.5)
+        self.declare_parameter('defect_use_mock_camera_selection', True)
+        self.declare_parameter('defect_mock_camera_set_parameters_service', '/mock_realsense/set_parameters')
+        self.declare_parameter(
+            'defect_snapshot_image_ids',
+            ['wall_05_right_img_0005', 'wall_05_right_img_0008'],
+        )
+        self.declare_parameter('post_snapshot_2_reach_enabled', True)
+        self.declare_parameter('post_snapshot_2_switch_mux_to_raw', True)
+        self.declare_parameter('post_snapshot_2_set_ros_ctrl_false', True)
+        self.declare_parameter('post_snapshot_2_call_homing', True)
         self.declare_parameter('shutdown_on_completion', False)
 
         self.homing_service = self.get_parameter('homing_service').value
@@ -410,6 +436,30 @@ class DemoOrchestrator(Node):
         self.joint_orientation_step_limit_rad = float(
             self.get_parameter('joint_orientation_step_limit_rad').value
         )
+        self.joint_orientation_skip_threshold_rad = float(
+            self.get_parameter('joint_orientation_skip_threshold_rad').value
+        )
+        self.first_alignment_use_hardcoded_joint7 = bool(
+            self.get_parameter('first_alignment_use_hardcoded_joint7').value
+        )
+        self.first_alignment_joint7_positions = [
+            float(value) for value in self.get_parameter('first_alignment_joint7_positions').value
+        ]
+        self.first_alignment_append_reverse = bool(
+            self.get_parameter('first_alignment_append_reverse').value
+        )
+        self.second_alignment_use_hardcoded_joint7 = bool(
+            self.get_parameter('second_alignment_use_hardcoded_joint7').value
+        )
+        self.second_alignment_joint7_positions = [
+            float(value) for value in self.get_parameter('second_alignment_joint7_positions').value
+        ]
+        self.second_alignment_joint_hold_sec = float(
+            self.get_parameter('second_alignment_joint_hold_sec').value
+        )
+        self.post_snapshot_2_reverse_hardcoded_joint7 = bool(
+            self.get_parameter('post_snapshot_2_reverse_hardcoded_joint7').value
+        )
         self.require_exclusive_joint_command_topic = bool(
             self.get_parameter('require_exclusive_joint_command_topic').value
         )
@@ -424,6 +474,47 @@ class DemoOrchestrator(Node):
             self.get_parameter('debug_selected_pose_base_link_frame').value
         )
         self.debug_ee_pose_frame = self.get_parameter('debug_ee_pose_frame').value
+        self.defect_capture_service_name = self.get_parameter('defect_capture_service_name').value
+        self.defect_capture_timeout_sec = float(self.get_parameter('defect_capture_timeout_sec').value)
+        self.defect_capture_shot_ids = [
+            int(value) for value in self.get_parameter('defect_capture_shot_ids').value
+        ]
+        self.defect_capture_max_retries_per_shot = int(
+            self.get_parameter('defect_capture_max_retries_per_shot').value
+        )
+        self.defect_capture_settle_sec = float(self.get_parameter('defect_capture_settle_sec').value)
+        self.defect_capture_wait_after_quartet_sec = float(
+            self.get_parameter('defect_capture_wait_after_quartet_sec').value
+        )
+        self.defect_use_mock_camera_selection = bool(
+            self.get_parameter('defect_use_mock_camera_selection').value
+        )
+        self.defect_mock_camera_set_parameters_service = (
+            self.get_parameter('defect_mock_camera_set_parameters_service').value
+        )
+        self.defect_snapshot_image_ids = list(self.get_parameter('defect_snapshot_image_ids').value)
+        self.post_snapshot_2_reach_enabled = bool(
+            self.get_parameter('post_snapshot_2_reach_enabled').value
+        )
+        self.post_snapshot_2_switch_mux_to_raw = bool(
+            self.get_parameter('post_snapshot_2_switch_mux_to_raw').value
+        )
+        self.post_snapshot_2_set_ros_ctrl_false = bool(
+            self.get_parameter('post_snapshot_2_set_ros_ctrl_false').value
+        )
+        self.post_snapshot_2_call_homing = bool(
+            self.get_parameter('post_snapshot_2_call_homing').value
+        )
+        if not self.defect_capture_shot_ids:
+            raise ValueError('defect_capture_shot_ids must be a non-empty list of positive integers')
+        if any(int(shot_id) <= 0 for shot_id in self.defect_capture_shot_ids):
+            raise ValueError('defect_capture_shot_ids entries must be > 0')
+        if self.defect_capture_max_retries_per_shot <= 0:
+            raise ValueError('defect_capture_max_retries_per_shot must be > 0')
+        if self.first_alignment_use_hardcoded_joint7 and not self.first_alignment_joint7_positions:
+            raise ValueError('first_alignment_joint7_positions must be non-empty when enabled')
+        if self.second_alignment_use_hardcoded_joint7 and not self.second_alignment_joint7_positions:
+            raise ValueError('second_alignment_joint7_positions must be non-empty when enabled')
         self.shutdown_on_completion = bool(self.get_parameter('shutdown_on_completion').value)
 
         self._service_clients = {}
@@ -433,12 +524,13 @@ class DemoOrchestrator(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=False)
         self.debug_tf_broadcaster = TransformBroadcaster(self)
-        self.debug_static_tf_broadcaster = StaticTransformBroadcaster(self)
         self.nav_action_client = ActionClient(self, NavigateToPose, self.nav2_action_name)
         self.joint_command_pub = self.create_publisher(JointCommand, self.joint_command_topic, 10)
         self._latest_joint_state = None
         self._joint_state_seq = 0
         self._joint_command_mux_state = None
+        self._last_debug_target_pose = None
+        self._last_debug_target_frame = ''
 
         self.create_subscription(PoseArray, self.filtered_pose_topic, self._filtered_pose_callback, 10)
         self.create_subscription(
@@ -504,6 +596,14 @@ class DemoOrchestrator(Node):
             f"joint_command_topic={self.joint_command_topic} "
             f"joint_command_ctrl_mode={self.joint_command_ctrl_mode} "
             f"joint_orientation_step_limit_rad={self.joint_orientation_step_limit_rad:.3f} "
+            f"joint_orientation_skip_threshold_rad={self.joint_orientation_skip_threshold_rad:.3f} "
+            f"first_alignment_use_hardcoded_joint7={self.first_alignment_use_hardcoded_joint7} "
+            f"first_alignment_joint7_positions={self.first_alignment_joint7_positions} "
+            f"first_alignment_append_reverse={self.first_alignment_append_reverse} "
+            f"second_alignment_use_hardcoded_joint7={self.second_alignment_use_hardcoded_joint7} "
+            f"second_alignment_joint7_positions={self.second_alignment_joint7_positions} "
+            f"second_alignment_joint_hold_sec={self.second_alignment_joint_hold_sec:.3f} "
+            f"post_snapshot_2_reverse_hardcoded_joint7={self.post_snapshot_2_reverse_hardcoded_joint7} "
             f"require_exclusive_joint_command_topic={self.require_exclusive_joint_command_topic} "
             f"use_joint_command_mux={self.use_joint_command_mux} "
             f"joint_command_mux_service={self.joint_command_mux_service} "
@@ -513,7 +613,20 @@ class DemoOrchestrator(Node):
             f"debug_publish_only={self.debug_publish_only} "
             f"debug_selected_pose_frame={self.debug_selected_pose_frame} "
             f"debug_selected_pose_base_link_frame={self.debug_selected_pose_base_link_frame} "
-            f"debug_ee_pose_frame={self.debug_ee_pose_frame}"
+            f"debug_ee_pose_frame={self.debug_ee_pose_frame} "
+            f"defect_capture_service_name={self.defect_capture_service_name} "
+            f"defect_capture_timeout_sec={self.defect_capture_timeout_sec:.2f} "
+            f"defect_capture_shot_ids={self.defect_capture_shot_ids} "
+            f"defect_capture_max_retries_per_shot={self.defect_capture_max_retries_per_shot} "
+            f"defect_capture_settle_sec={self.defect_capture_settle_sec:.2f} "
+            f"defect_capture_wait_after_quartet_sec={self.defect_capture_wait_after_quartet_sec:.2f} "
+            f"defect_use_mock_camera_selection={self.defect_use_mock_camera_selection} "
+            f"defect_mock_camera_set_parameters_service={self.defect_mock_camera_set_parameters_service} "
+            f"defect_snapshot_image_ids={self.defect_snapshot_image_ids} "
+            f"post_snapshot_2_reach_enabled={self.post_snapshot_2_reach_enabled} "
+            f"post_snapshot_2_switch_mux_to_raw={self.post_snapshot_2_switch_mux_to_raw} "
+            f"post_snapshot_2_set_ros_ctrl_false={self.post_snapshot_2_set_ros_ctrl_false} "
+            f"post_snapshot_2_call_homing={self.post_snapshot_2_call_homing}"
         )
 
     def _joint_state_callback(self, msg: JointState) -> None:
@@ -675,7 +788,20 @@ class DemoOrchestrator(Node):
 
     def _compute_pose_error_from_tf(self, task_base_link: str) -> dict:
         actual_pose = self._lookup_pose_in_frame(task_base_link, self.ee_frame)
-        target_pose = self._lookup_pose_in_frame(task_base_link, self.debug_ee_pose_frame)
+        try:
+            target_pose = self._lookup_pose_in_frame(task_base_link, self.debug_ee_pose_frame)
+        except Exception as exc:  # pylint: disable=broad-except
+            if (
+                self._last_debug_target_pose is not None
+                and self._last_debug_target_frame == task_base_link
+            ):
+                self.get_logger().warning(
+                    f"Using cached debug target pose because TF frame '{self.debug_ee_pose_frame}' "
+                    f"is unavailable: {exc}"
+                )
+                target_pose = copy_pose(self._last_debug_target_pose)
+            else:
+                raise
 
         actual_q = normalize_quaternion(
             (
@@ -739,22 +865,49 @@ class DemoOrchestrator(Node):
             orientation_error_for_command = float(orientation_error_override_rad)
         direction = -1.0 if yaw_error >= 0.0 else 1.0
         desired_delta = direction * orientation_error_for_command
+        skip_threshold = max(0.0, float(self.joint_orientation_skip_threshold_rad))
         step_limit = max(0.0, float(self.joint_orientation_step_limit_rad))
-        if step_limit > 0.0:
-            commanded_delta = max(-step_limit, min(step_limit, desired_delta))
+
+        if abs(desired_delta) < skip_threshold:
+            self.get_logger().info(
+                f"Skipping jaw correction: |delta|={abs(desired_delta):.6f} rad "
+                f"< skip_threshold_rad={skip_threshold:.6f}"
+            )
+            return {
+                "joint_name": self.jaw_joint_name,
+                "current_position": float('nan'),
+                "commanded_position": float('nan'),
+                "orientation_error_angle_rad": orientation_error_angle,
+                "orientation_error_for_command_rad": orientation_error_for_command,
+                "yaw_error_rad": yaw_error,
+                "yaw_error_deg": math.degrees(yaw_error),
+                "desired_delta_rad": desired_delta,
+                "applied_delta_rad": 0.0,
+                "step_limit_rad": step_limit,
+                "skip_threshold_rad": skip_threshold,
+                "skipped_small_delta": True,
+                "ctrl_mode": int(max(0, min(255, int(self.joint_command_ctrl_mode)))),
+                "task_base_link": task_base_link,
+                "ee_frame": self.ee_frame,
+                "target_frame": self.debug_ee_pose_frame,
+            }
+
+        if step_limit > 0.0 and abs(desired_delta) > step_limit:
+            commanded_delta = math.copysign(step_limit, desired_delta)
         else:
             commanded_delta = desired_delta
         commanded_position = current_position + commanded_delta
         self.get_logger().info(
             f"Jaw correction values: joint={self.jaw_joint_name} "
-            f"current={current_position:.6f} "
-            f"new_reference={commanded_position:.6f} "
-            f"yaw_error_deg={math.degrees(yaw_error):.3f} "
+            # f"current={current_position:.6f} "
+            # f"new_reference={commanded_position:.6f} "
+            # f"yaw_error_deg={math.degrees(yaw_error):.3f} "
             f"orientation_error_angle_rad={orientation_error_angle:.6f} "
             f"orientation_error_for_command_rad={orientation_error_for_command:.6f} "
             f"desired_delta_rad={desired_delta:.6f} "
             f"applied_delta_rad={commanded_delta:.6f} "
-            f"step_limit_rad={step_limit:.6f}"
+            # f"step_limit_rad={step_limit:.6f} "
+            # f"skip_threshold_rad={skip_threshold:.6f}"
         )
 
         command = JointCommand()
@@ -803,6 +956,8 @@ class DemoOrchestrator(Node):
                     "desired_delta_rad": desired_delta,
                     "applied_delta_rad": commanded_delta,
                     "step_limit_rad": step_limit,
+                    "skip_threshold_rad": skip_threshold,
+                    "skipped_small_delta": False,
                     "commanded_position": commanded_position,
                     "ctrl_mode": self.joint_command_ctrl_mode,
                     "publishers_on_joint_command_topic": publishers_count,
@@ -827,6 +982,8 @@ class DemoOrchestrator(Node):
             "desired_delta_rad": desired_delta,
             "applied_delta_rad": commanded_delta,
             "step_limit_rad": step_limit,
+            "skip_threshold_rad": skip_threshold,
+            "skipped_small_delta": False,
             "ctrl_mode": int(command.ctrl_mode[0]) if command.ctrl_mode else 0,
             "task_base_link": task_base_link,
             "ee_frame": self.ee_frame,
@@ -869,13 +1026,12 @@ class DemoOrchestrator(Node):
             f"arm_target_pose(frame={target_frame})={pose_to_dict(target_pose)}"
         )
 
-        self.debug_static_tf_broadcaster.sendTransform(transforms)
-        deadline = time.monotonic() + max(0.0, self.debug_tf_hold_sec)
-        while rclpy.ok():
-            self.debug_tf_broadcaster.sendTransform(transforms)
-            if time.monotonic() >= deadline:
-                break
-            rclpy.spin_once(self, timeout_sec=0.1)
+        stamp = self.get_clock().now().to_msg()
+        for transform in transforms:
+            transform.header.stamp = stamp
+        self.debug_tf_broadcaster.sendTransform(transforms)
+        self._last_debug_target_pose = copy_pose(target_pose)
+        self._last_debug_target_frame = target_frame
 
     def _build_tcp_waypoints(
         self,
@@ -1395,61 +1551,61 @@ class DemoOrchestrator(Node):
         current_reference = ci.wait_for_message(
             PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
         )
-        self.get_logger().info(
-            pprint.pformat(
-                {
-                    "task_name": task_name,
-                    "generic": {
-                        "type": list(task_info.type),
-                        "lambda1": task_info.lambda1,
-                        "lambda2": task_info.lambda2,
-                        "activation_state": task_info.activation_state,
-                        "size": task_info.size,
-                        "indices": list(task_info.indices),
-                    },
-                    "cartesian": {
-                        "base_link": cartesian_info.base_link,
-                        "distal_link": cartesian_info.distal_link,
-                        "control_mode": cartesian_info.control_mode,
-                        "state": cartesian_info.state,
-                        "max_vel_lin": cartesian_info.max_vel_lin,
-                        "max_vel_ang": cartesian_info.max_vel_ang,
-                        "max_acc_lin": cartesian_info.max_acc_lin,
-                        "max_acc_ang": cartesian_info.max_acc_ang,
-                    },
-                    "current_reference": pose_to_dict(current_reference.pose),
-                }
-            )
-        )
+        # self.get_logger().info(
+        #     pprint.pformat(
+        #         {
+        #             "task_name": task_name,
+        #             "generic": {
+        #                 "type": list(task_info.type),
+        #                 "lambda1": task_info.lambda1,
+        #                 "lambda2": task_info.lambda2,
+        #                 "activation_state": task_info.activation_state,
+        #                 "size": task_info.size,
+        #                 "indices": list(task_info.indices),
+        #             },
+        #             "cartesian": {
+        #                 "base_link": cartesian_info.base_link,
+        #                 "distal_link": cartesian_info.distal_link,
+        #                 "control_mode": cartesian_info.control_mode,
+        #                 "state": cartesian_info.state,
+        #                 "max_vel_lin": cartesian_info.max_vel_lin,
+        #                 "max_vel_ang": cartesian_info.max_vel_ang,
+        #                 "max_acc_lin": cartesian_info.max_acc_lin,
+        #                 "max_acc_ang": cartesian_info.max_acc_ang,
+        #             },
+        #             "current_reference": pose_to_dict(current_reference.pose),
+        #         }
+        #     )
+        # )
 
         lambda_to_set = float(task_info.lambda1)
         lambda_response = ci.set_lambda(task_name, lambda_to_set)
         active_response = ci.set_task_active(task_name, task_info.activation_state.lower() == "enabled")
         base_link_response = ci.set_base_link(task_name, cartesian_info.base_link)
         control_mode_response = ci.set_control_mode(task_name, cartesian_info.control_mode)
-        self.get_logger().info(
-            pprint.pformat(
-                {
-                    "set_lambda": {
-                        "success": lambda_response.success,
-                        "message": lambda_response.message,
-                        "value": lambda_to_set,
-                    },
-                    "set_active": {
-                        "success": active_response.success,
-                        "message": active_response.message,
-                    },
-                    "set_base_link": {
-                        "success": base_link_response.success,
-                        "message": base_link_response.message,
-                    },
-                    "set_control_mode": {
-                        "success": control_mode_response.success,
-                        "message": control_mode_response.message,
-                    },
-                }
-            )
-        )
+        # self.get_logger().info(
+        #     pprint.pformat(
+        #         {
+        #             "set_lambda": {
+        #                 "success": lambda_response.success,
+        #                 "message": lambda_response.message,
+        #                 "value": lambda_to_set,
+        #             },
+        #             "set_active": {
+        #                 "success": active_response.success,
+        #                 "message": active_response.message,
+        #             },
+        #             "set_base_link": {
+        #                 "success": base_link_response.success,
+        #                 "message": base_link_response.message,
+        #             },
+        #             "set_control_mode": {
+        #                 "success": control_mode_response.success,
+        #                 "message": control_mode_response.message,
+        #             },
+        #         }
+        #     )
+        # )
         return task_name, cartesian_info
 
     def _build_reach_request(
@@ -1631,36 +1787,265 @@ class DemoOrchestrator(Node):
             "alignment_result": reach_result,
         }
 
-    def _run_phase_placeholder(self, phase_context: str, description: str) -> None:
-        self.get_logger().info(f"{phase_context}: placeholder - {description}")
+    def _publish_joint7_absolute_position(
+        self,
+        target_position: float,
+        min_joint_state_seq: int,
+        context: str,
+    ) -> dict:
+        joint_state = self._wait_for_joint_state(min_seq=min_joint_state_seq)
+        if self.jaw_joint_name not in joint_state.name:
+            raise RuntimeError(f"Joint '{self.jaw_joint_name}' not found in latest joint state")
+        joint_index = joint_state.name.index(self.jaw_joint_name)
+        current_position = self._get_joint_state_value(
+            joint_state,
+            joint_index,
+            ['link_position', 'position', 'motor_position'],
+            0.0,
+        )
+        publishers_count = self.count_publishers(self.joint_command_topic)
+        if self.require_exclusive_joint_command_topic and publishers_count > 1:
+            raise RuntimeError(
+                f"Refusing raw joint command on '{self.joint_command_topic}': "
+                f"publishers={publishers_count} (expected 1: this node only)"
+            )
+
+        command = JointCommand()
+        command.header.stamp = self.get_clock().now().to_msg()
+        command.name = [self.jaw_joint_name]
+        command.position = [float(target_position)]
+        command.velocity = [0.0]
+        command.effort = [0.0]
+        command.stiffness = [self._get_joint_state_value(joint_state, joint_index, ['stiffness'], 0.0)]
+        command.damping = [self._get_joint_state_value(joint_state, joint_index, ['damping'], 0.0)]
+        command.ctrl_mode = [max(0, min(255, int(self.joint_command_ctrl_mode)))]
+        command.aux_name = ''
+        command.aux = []
+        self.joint_command_pub.publish(command)
+        self.get_logger().info(
+            f"{context}: published absolute {self.jaw_joint_name} position={target_position:.6f} "
+            f"(current={current_position:.6f}) on '{self.joint_command_topic}'"
+        )
+        return {
+            "joint_name": self.jaw_joint_name,
+            "current_position": current_position,
+            "commanded_position": float(target_position),
+            "ctrl_mode": int(command.ctrl_mode[0]) if command.ctrl_mode else 0,
+            "publishers_on_joint_command_topic": publishers_count,
+            "context": context,
+        }
+
+    def _compose_bidirectional_joint7_sequence(
+        self,
+        base_positions: List[float],
+        append_reverse: bool,
+    ) -> List[float]:
+        sequence = [float(value) for value in base_positions]
+        if append_reverse and sequence:
+            if len(sequence) == 1:
+                sequence.append(float(sequence[0]))
+            else:
+                sequence.extend(reversed(sequence[:-1]))
+        return sequence
+
+    def _execute_second_alignment_hardcoded_joint7_phase(
+        self,
+        phase_context: str,
+        task_base_link: str,
+        min_joint_state_seq: int,
+        positions: List[float] | None = None,
+    ) -> dict:
+        sequence_positions = (
+            [float(value) for value in self.second_alignment_joint7_positions]
+            if positions is None
+            else [float(value) for value in positions]
+        )
+        if not sequence_positions:
+            raise ValueError(f"{phase_context}: hardcoded joint7 sequence is empty")
+
+        self._set_joint_command_mux(
+            use_cartesio=False,
+            force=True,
+            context=f"{phase_context}_hardcoded_prepare",
+        )
+
+        attempt_results = []
+        for idx, target_position in enumerate(sequence_positions, start=1):
+            command_report = self._publish_joint7_absolute_position(
+                target_position=float(target_position),
+                min_joint_state_seq=max(min_joint_state_seq, self._joint_state_seq),
+                context=f"{phase_context}_hardcoded_{idx}",
+            )
+            if self.second_alignment_joint_hold_sec > 0.0:
+                time.sleep(self.second_alignment_joint_hold_sec)
+
+            try:
+                tf_error = self._compute_pose_error_from_tf(task_base_link)
+                orientation_error_after = float(tf_error["orientation_error_angle_rad"])
+                yaw_error_after = float(tf_error["yaw_error_rad"])
+            except Exception as exc:  # pylint: disable=broad-except
+                self.get_logger().warning(
+                    f"{phase_context}: failed TF error evaluation after hardcoded command {idx}: {exc}"
+                )
+                orientation_error_after = float('nan')
+                yaw_error_after = float('nan')
+
+            attempt_results.append(
+                {
+                    "mode": "hardcoded_joint7_absolute",
+                    "attempt": idx,
+                    "target_position": float(target_position),
+                    "orientation_error_after_rad": orientation_error_after,
+                    "yaw_error_after_rad": yaw_error_after,
+                    "result": command_report,
+                }
+            )
+
+        alignment_result = {
+            "mode": "hardcoded_joint7_absolute",
+            "hardcoded_positions": [float(value) for value in sequence_positions],
+            "orientation_error_angle": (
+                attempt_results[-1]["orientation_error_after_rad"] if attempt_results else float('nan')
+            ),
+            "orientation_error_angle_source": "tf_after_hardcoded_joint7_sequence",
+        }
+        return {
+            "phase_context": phase_context,
+            "alignment_attempt_results": attempt_results,
+            "alignment_result": alignment_result,
+        }
+
+    def _snapshot_image_id_for_phase(self, phase_index: int) -> str:
+        if phase_index < len(self.defect_snapshot_image_ids):
+            configured = str(self.defect_snapshot_image_ids[phase_index]).strip()
+            if configured:
+                return configured
+        return f"pose_{phase_index + 1}_{int(time.time() * 1000)}"
+
+    def _set_mock_camera_selection(self, image_id: str, shot_id: int) -> None:
+        if not self.defect_use_mock_camera_selection:
+            return
+
+        request = SetParameters.Request()
+
+        image_param = Parameter()
+        image_param.name = 'active_image_id'
+        image_param.value = ParameterValue(
+            type=ParameterType.PARAMETER_STRING,
+            string_value=image_id,
+        )
+
+        shot_param = Parameter()
+        shot_param.name = 'active_shot_id'
+        shot_param.value = ParameterValue(
+            type=ParameterType.PARAMETER_INTEGER,
+            integer_value=int(shot_id),
+        )
+
+        request.parameters = [image_param, shot_param]
+        response = self._call_service(
+            SetParameters,
+            self.defect_mock_camera_set_parameters_service,
+            request,
+            self.defect_capture_timeout_sec,
+        )
+        failures = [result.reason for result in response.results if not result.successful]
+        if failures:
+            raise RuntimeError(
+                f"Mock camera rejected selection image_id={image_id} shot_id={shot_id}: {failures}"
+            )
+
+    def _run_defect_snapshot_phase(self, phase_context: str, phase_index: int) -> dict:
+        image_id = self._snapshot_image_id_for_phase(phase_index)
+        shot_results = []
+        retry_count = max(1, int(self.defect_capture_max_retries_per_shot))
+
+        for shot_id in self.defect_capture_shot_ids:
+            accepted_response = None
+            for attempt in range(1, retry_count + 1):
+                self.get_logger().info(
+                    f"{phase_context}: capture request image_id={image_id} shot_id={shot_id} "
+                    f"(attempt {attempt}/{retry_count})"
+                )
+                self._set_mock_camera_selection(image_id=image_id, shot_id=shot_id)
+                if self.defect_capture_settle_sec > 0.0:
+                    time.sleep(self.defect_capture_settle_sec)
+
+                request = CaptureShot.Request()
+                request.image_id = image_id
+                request.shot_id = int(shot_id)
+                response = self._call_service(
+                    CaptureShot,
+                    self.defect_capture_service_name,
+                    request,
+                    self.defect_capture_timeout_sec,
+                )
+                if response.accepted:
+                    accepted_response = response
+                    break
+
+                self.get_logger().warning(
+                    f"{phase_context}: capture rejected image_id={image_id} shot_id={shot_id} "
+                    f"status={response.status_code} message={response.message}"
+                )
+
+            if accepted_response is None:
+                raise RuntimeError(
+                    f"{phase_context}: failed to capture shot {shot_id} for image_id={image_id} "
+                    f"after {retry_count} attempts"
+                )
+
+            shot_results.append(
+                {
+                    "shot_id": int(shot_id),
+                    "accepted": bool(accepted_response.accepted),
+                    "status_code": accepted_response.status_code,
+                    "message": accepted_response.message,
+                    "queue_depth": int(accepted_response.queue_depth),
+                    "accepted_stamp": {
+                        "sec": int(accepted_response.accepted_stamp.sec),
+                        "nanosec": int(accepted_response.accepted_stamp.nanosec),
+                    },
+                }
+            )
+
+        if self.defect_capture_wait_after_quartet_sec > 0.0:
+            time.sleep(self.defect_capture_wait_after_quartet_sec)
+
+        return {
+            "phase_context": phase_context,
+            "image_id": image_id,
+            "shot_ids": [int(shot_id) for shot_id in self.defect_capture_shot_ids],
+            "capture_results": shot_results,
+        }
 
     def _run_sequence(self) -> None:
         try:
-            # self.get_logger().info('Starting demo orchestration sequence')
+            self.get_logger().info('Starting demo orchestration sequence')
             self.get_logger().info(
-                'Step 1/12: switch and nav preamble (calls below are intentionally commented)'
+                'Step 1/16: switch and nav preamble (calls below are intentionally commented)'
             )
             # self._call_switch(self.homing_service)
-            # self.get_logger().info(
-            #     f"Step 1/5 complete; sleeping {self.inter_switch_delay_sec:.1f} s before omnisteering switch"
-            # )
+            self.get_logger().info(
+                f"Step 1/5 complete; sleeping {self.inter_switch_delay_sec:.1f} s before omnisteering switch"
+            )
             # time.sleep(7.0)
-            # self.get_logger().info('Step 2/5: enabling omnisteering switch')
+            self.get_logger().info('Step 2/5: enabling omnisteering switch')
             # self._call_switch(self.omnisteering_service)
             # time.sleep(5)
             # self._call_switch(self.ros_ctrl_service)
             # time.sleep(12)
-            # self.get_logger().info('Step 3/5: waiting for Nav2 readiness')
-            # self._wait_for_nav2_active()
-            self.get_logger().info('Step 4/12: request first filtered pose')
+            self.get_logger().info('Step 3/5: waiting for Nav2 readiness')
+            self._wait_for_nav2_active()
+            self.get_logger().info('Step 4/16: request first filtered pose')
             filtered_poses = self._request_filtered_poses()
-            # self.get_logger().info('Step 4/5: requesting filtered wall poses')
-            # self.get_logger().info(
-            #     f"Step 4/5 complete; first filtered pose={self._pose_to_string(filtered_poses.poses[0])}"
-            # )
-            # self.get_logger().info('Step 5/5a: sending Nav2 goal')
-            # self._send_nav_goal()
-            # self.get_logger().info('Step 5/5b: sending Cartesian arm goal to first filtered pose')
+            self.get_logger().info('Step 4/5: requesting filtered wall poses')
+            self.get_logger().info(
+                f"Step 4/5 complete; first filtered pose={self._pose_to_string(filtered_poses.poses[0])}"
+            )
+            self.get_logger().info('Step 5/5a: sending Nav2 goal')
+            self._send_nav_goal()
+            self.get_logger().info('Step 5/5b: sending Cartesian arm goal to first filtered pose')
 
             ci = CartesioRos2Client(
                 namespace=self.cartesian_namespace,
@@ -1669,12 +2054,12 @@ class DemoOrchestrator(Node):
             )
             try:
                 self.get_logger().info(
-                    "Step 5/12: setup CartesIO task and request mux switch to cartesio"
+                    "Step 5/16: setup CartesIO task and request mux switch to cartesio"
                 )
                 self._set_joint_command_mux(use_cartesio=True, force=True, context='arm_setup')
                 task_name, cartesian_info = self._prepare_cartesian_task(ci)
 
-                self.get_logger().info("Step 6/12: arm movement phase 1 (waypoint + pose 1)")
+                self.get_logger().info("Step 6/16: arm movement phase 1 (waypoint + pose 1)")
                 reference_before_first = ci.wait_for_message(
                     PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
                 )
@@ -1693,21 +2078,37 @@ class DemoOrchestrator(Node):
                     )
                     return
 
-                self.get_logger().info("Step 7/12: alignment phase 1")
-                phase_2_alignment = self._execute_alignment_phase(
-                    phase_context='phase_2_alignment_1',
-                    reach_result=phase_1_movement["reach_result"],
-                    task_base_link=cartesian_info.base_link,
-                    min_joint_state_seq=phase_1_movement["min_joint_state_seq_for_alignment"],
-                )
+                self.get_logger().info("Step 7/16: alignment phase 1")
+                if self.first_alignment_use_hardcoded_joint7:
+                    phase_1_joint7_sequence = self._compose_bidirectional_joint7_sequence(
+                        base_positions=self.first_alignment_joint7_positions,
+                        append_reverse=self.first_alignment_append_reverse,
+                    )
+                    self.get_logger().info(
+                        "Using hardcoded phase-1 alignment for joint7 with sequence "
+                        f"{phase_1_joint7_sequence}"
+                    )
+                    phase_2_alignment = self._execute_second_alignment_hardcoded_joint7_phase(
+                        phase_context='phase_2_alignment_1',
+                        task_base_link=cartesian_info.base_link,
+                        min_joint_state_seq=phase_1_movement["min_joint_state_seq_for_alignment"],
+                        positions=phase_1_joint7_sequence,
+                    )
+                else:
+                    phase_2_alignment = self._execute_alignment_phase(
+                        phase_context='phase_2_alignment_1',
+                        reach_result=phase_1_movement["reach_result"],
+                        task_base_link=cartesian_info.base_link,
+                        min_joint_state_seq=phase_1_movement["min_joint_state_seq_for_alignment"],
+                    )
 
-                self.get_logger().info("Step 8/12: placeholder phase 1")
-                self._run_phase_placeholder(
-                    phase_context='phase_3_placeholder_task_1',
-                    description='implement task-specific action here',
-                )
+                # self.get_logger().info("Step 8/16: defect snapshot phase 1 (quartet capture)")
+                # phase_3_snapshot = self._run_defect_snapshot_phase(
+                #     phase_context='phase_3_defect_snapshot_1',
+                #     phase_index=0,
+                # )
 
-                self.get_logger().info("Step 9/12: second filtering with filter_windows_2")
+                self.get_logger().info("Step 9/16: second filtering with filter_windows_2")
                 if not self.filter_windows_2 or not self.filter_windows_2.strip():
                     raise RuntimeError("filter_windows_2 is required for the second arm goal phase but is empty")
                 second_filtered = self._request_filtered_poses(
@@ -1721,7 +2122,7 @@ class DemoOrchestrator(Node):
                     phase_1_movement["target_pose"],
                 )
 
-                self.get_logger().info("Step 10/12: arm movement phase 2 (waypoint + pose 2)")
+                self.get_logger().info("Step 10/16: arm movement phase 2 (waypoint + pose 2)")
                 phase_5_movement = self._execute_reach_phase(
                     ci=ci,
                     task_name=task_name,
@@ -1737,31 +2138,131 @@ class DemoOrchestrator(Node):
                     )
                     return
 
-                self.get_logger().info("Step 11/12: alignment phase 2")
-                phase_6_alignment = self._execute_alignment_phase(
-                    phase_context='phase_6_alignment_2',
-                    reach_result=phase_5_movement["reach_result"],
-                    task_base_link=cartesian_info.base_link,
-                    min_joint_state_seq=phase_5_movement["min_joint_state_seq_for_alignment"],
-                )
+                self.get_logger().info("Step 11/16: alignment phase 2")
+                if self.second_alignment_use_hardcoded_joint7:
+                    self.get_logger().info(
+                        "Using hardcoded phase-2 alignment for joint7 with positions "
+                        f"{self.second_alignment_joint7_positions}"
+                    )
+                    phase_6_alignment = self._execute_second_alignment_hardcoded_joint7_phase(
+                        phase_context='phase_6_alignment_2',
+                        task_base_link=cartesian_info.base_link,
+                        min_joint_state_seq=phase_5_movement["min_joint_state_seq_for_alignment"],
+                    )
+                else:
+                    phase_6_alignment = self._execute_alignment_phase(
+                        phase_context='phase_6_alignment_2',
+                        reach_result=phase_5_movement["reach_result"],
+                        task_base_link=cartesian_info.base_link,
+                        min_joint_state_seq=phase_5_movement["min_joint_state_seq_for_alignment"],
+                    )
 
-                self.get_logger().info("Step 12/12: placeholder phase 2")
-                self._run_phase_placeholder(
-                    phase_context='phase_7_placeholder_task_2',
-                    description='implement second task-specific action here',
-                )
+                # self.get_logger().info("Step 12/16: defect snapshot phase 2 (quartet capture)")
+                # phase_7_snapshot = self._run_defect_snapshot_phase(
+                #     phase_context='phase_7_defect_snapshot_2',
+                #     phase_index=1,
+                # )
+
+                phase_7b_post_snapshot_2_reverse_joint7 = None
+                if (
+                    self.second_alignment_use_hardcoded_joint7
+                    and self.post_snapshot_2_reverse_hardcoded_joint7
+                ):
+                    reverse_positions = list(reversed(self.second_alignment_joint7_positions))
+                    self.get_logger().info(
+                        "Step 12.5/16: reverse hardcoded joint7 sequence before post-snapshot-2 waypoints "
+                        f"{reverse_positions}"
+                    )
+                    phase_7b_post_snapshot_2_reverse_joint7 = (
+                        self._execute_second_alignment_hardcoded_joint7_phase(
+                            phase_context='phase_7b_post_snapshot_2_reverse_joint7',
+                            task_base_link=cartesian_info.base_link,
+                            min_joint_state_seq=max(
+                                phase_5_movement["min_joint_state_seq_for_alignment"],
+                                self._joint_state_seq,
+                            ),
+                            positions=reverse_positions,
+                        )
+                    )
+
+                phase_8_post_snapshot_2_reach = None
+                phase_9_post_snapshot_2_mux_raw = None
+                phase_10_post_snapshot_2_ros_ctrl_false = None
+                phase_11_post_snapshot_2_homing = None
+                if self.post_snapshot_2_reach_enabled:
+                    self.get_logger().info(
+                        "Step 13/16: post-snapshot-2 TCP reach (waypoints only, no alignment)"
+                    )
+                    reference_before_post_snapshot_2 = ci.wait_for_message(
+                        PoseStamped, f"{task_name}/current_reference", timeout_sec=2.0
+                    )
+                    post_snapshot_2_waypoints, post_snapshot_2_times = self._build_second_tcp_waypoints(
+                        cartesian_info.base_link
+                    )
+                    phase_8_post_snapshot_2_reach = self._execute_reach_phase(
+                        ci=ci,
+                        task_name=task_name,
+                        task_base_link=cartesian_info.base_link,
+                        reference_before=reference_before_post_snapshot_2,
+                        phase_context='phase_8_post_snapshot_2_reach',
+                        explicit_waypoints=post_snapshot_2_waypoints,
+                        explicit_times=post_snapshot_2_times,
+                    )
+                else:
+                    self.get_logger().info(
+                        "Step 13/16: post-snapshot-2 TCP reach disabled by parameter"
+                    )
+
+                if self.post_snapshot_2_switch_mux_to_raw:
+                    self.get_logger().info("Step 14/16: switch mux to raw")
+                    self._set_joint_command_mux(
+                        use_cartesio=False,
+                        force=True,
+                        context='post_snapshot_2_raw',
+                    )
+                    phase_9_post_snapshot_2_mux_raw = {"switch_to_raw_requested": True}
+                else:
+                    self.get_logger().info("Step 14/16: mux-to-raw disabled by parameter")
+
+                if self.post_snapshot_2_set_ros_ctrl_false:
+                    self.get_logger().info("Step 15/16: set ros_ctrl switch to false")
+                    self._call_switch(self.ros_ctrl_service, value=False)
+                    phase_10_post_snapshot_2_ros_ctrl_false = {"ros_ctrl_set_to_false": True}
+                    time.sleep(5)
+                else:
+                    self.get_logger().info("Step 15/16: ros_ctrl false call disabled by parameter")
+
+                if self.post_snapshot_2_call_homing:
+                    self.get_logger().info("Step 16/16: call homing service")
+                    self._call_switch(self.omnisteering_service, value=False)
+                    time.sleep(2)
+                    self._call_switch(self.homing_service, value=True)
+                    phase_11_post_snapshot_2_homing = {"homing_requested": True}
+                else:
+                    self.get_logger().info("Step 16/16: homing call disabled by parameter")
 
                 self.get_logger().info(
                     pprint.pformat(
                         {
                             "phase_1_movement": phase_1_movement,
                             "phase_2_alignment": phase_2_alignment,
+                            "phase_3_defect_snapshot": phase_3_snapshot,
                             "phase_4_second_filtering": {
                                 "selected_pose": pose_to_dict(second_filtered_pose),
                                 "selected_frame": second_filtered_frame,
                             },
                             "phase_5_movement": phase_5_movement,
                             "phase_6_alignment": phase_6_alignment,
+                            "phase_7_defect_snapshot": phase_7_snapshot,
+                            "phase_7b_post_snapshot_2_reverse_joint7": (
+                                phase_7b_post_snapshot_2_reverse_joint7
+                            ),
+                            "phase_8_post_snapshot_2_reach": phase_8_post_snapshot_2_reach,
+                            "phase_9_post_snapshot_2_mux_raw": phase_9_post_snapshot_2_mux_raw,
+                            "phase_10_post_snapshot_2_ros_ctrl_false": (
+                                phase_10_post_snapshot_2_ros_ctrl_false
+                            ),
+                            "phase_11_post_snapshot_2_homing": phase_11_post_snapshot_2_homing,
                         }
                     )
                 )

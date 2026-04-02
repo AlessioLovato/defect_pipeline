@@ -12,11 +12,13 @@
 
   <depend>action_msgs</depend>
   <depend>cartesian_interface_ros</depend>
+  <depend>defect_map_interfaces</depend>
   <depend>geometry_msgs</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>
   <depend>lifecycle_msgs</depend>
   <depend>nav2_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>rclpy</depend>
   <depend>std_srvs</depend>
   <depend>tf2_ros</depend>
@@ -25,6 +27,7 @@
 
   <exec_depend>concert_gazebo</exec_depend>
   <exec_depend>concert_navigation</exec_depend>
+  <exec_depend>defect_localization</exec_depend>
   <exec_depend>harmonic_world_pointcloud_generator</exec_depend>
   <exec_depend>interior_wall_extractor</exec_depend>
 

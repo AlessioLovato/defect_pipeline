@@ -65,6 +65,21 @@ def generate_launch_description():
         )
     )
 
+    defect_localization_mock_pipeline = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution(
+                [FindPackageShare('defect_localization'), 'launch', 'mock_test_pipeline.launch.py']
+            )
+        ),
+        launch_arguments={
+            # Pass explicit values using mock-specific launch arg names
+            # to avoid collisions with generic names from other includes.
+            'mock_camera_base_frame': 'map',
+            'mock_camera_frame_id': 'camera_color_optical_frame',
+            'mock_camera_depth_meters': '0.35',
+        }.items(),
+    )
+
     orchestrator = Node(
         package='demo',
         executable='orchestrator_node',
@@ -78,13 +93,14 @@ def generate_launch_description():
     return LaunchDescription([
         # foxglove_bridge,
         TimerAction(period=1.0, actions=[concert_gazebo]),
-        # TimerAction(period=10.0, actions=[concert_navigation]),
+        TimerAction(period=10.0, actions=[concert_navigation]),
         TimerAction(
             period=12.0,
             actions=[
                 world_generator,
                 wall_patch_planner,
                 interior_wall_pipeline,
+                defect_localization_mock_pipeline,
                 # concert_cartesio,
                 # orchestrator,
             ],

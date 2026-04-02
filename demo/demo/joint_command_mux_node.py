@@ -83,11 +83,11 @@ class JointCommandMuxNode(Node):
             self.get_logger().info(
                 f"Forwarding source switched to '{selected}' on '{self.output_command_topic}'"
             )
-        if self._forwarded_count <= 5 or self._forwarded_count % 100 == 0:
-            self.get_logger().info(
-                f"Forwarded command from '{source}' to '{self.output_command_topic}' "
-                f"forwarded_total={self._forwarded_count}"
-            )
+        # if self._forwarded_count <= 5 or self._forwarded_count % 100 == 0:
+        #     self.get_logger().info(
+        #         f"Forwarded command from '{source}' to '{self.output_command_topic}' "
+        #         f"forwarded_total={self._forwarded_count}"
+        #     )
 
     def _on_cartesio(self, msg: JointCommand) -> None:
         self._forward_if_selected(msg, 'cartesio')

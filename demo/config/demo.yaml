@@ -10,7 +10,7 @@ demo_orchestrator:
     nav2_action_name: /navigate_to_pose
     nav2_action_timeout_sec: 180.0
     goal_frame: map
-    nav_goal_x: -8.5
+    nav_goal_x: -8.75
     nav_goal_y: 2.0
     nav_goal_z: 0.0
     nav_goal_qx: 0.0
@@ -36,12 +36,37 @@ demo_orchestrator:
     reach_orientation_refine_enabled: true
     reach_orientation_refine_threshold_rad: 0.15
     reach_orientation_refine_max_attempts: 10
+    second_tcp_segment_time_sec: 10.0
+    second_tcp_waypoints_base_link: "[[0.542,-1.636,0.471,0.721,-0.051,0.658,0.212],[0.388,-1.332,0.475,0.687,-0.277,0.659,0.129]]"
     shutdown_on_completion: false
     rotate_arm_target_z_deg: 0.0
     joint_orientation_step_limit_rad: 0.5
+    joint_orientation_skip_threshold_rad: 0.22
     require_exclusive_joint_command_topic: true
     use_joint_command_mux: true
     joint_command_mux_service: /xbotcore/command_mux/use_cartesio
-    raw_command_hold_sec: 1.0
+    raw_command_hold_sec: 0.2
     joint_command_topic: /xbotcore/command_raw
     joint_command_ctrl_mode: 1
+    first_alignment_use_hardcoded_joint7: true
+    first_alignment_joint7_positions: [-0.1, 0.1]
+    first_alignment_append_reverse: true
+    second_alignment_use_hardcoded_joint7: true
+    second_alignment_joint7_positions: [-0.4, 0.0, 0.4, 0.9, 1.2]
+    second_alignment_joint_hold_sec: 0.3
+    post_snapshot_2_reverse_hardcoded_joint7: true
+    defect_capture_service_name: /defect_localization/capture_shot
+    defect_capture_timeout_sec: 10.0
+    defect_capture_shot_ids: [1, 2, 3, 4]
+    defect_capture_max_retries_per_shot: 3
+    defect_capture_settle_sec: 0.5
+    defect_capture_wait_after_quartet_sec: 0.5
+    defect_use_mock_camera_selection: true
+    defect_mock_camera_set_parameters_service: /mock_realsense/set_parameters
+    defect_snapshot_image_ids:
+      - wall_05_right_img_0005
+      - wall_05_right_img_0008
+    post_snapshot_2_reach_enabled: true
+    post_snapshot_2_switch_mux_to_raw: true
+    post_snapshot_2_set_ros_ctrl_false: true
+    post_snapshot_2_call_homing: true
